@@ -54,6 +54,7 @@ class Settings:
     data_root: Path = Path("data")
     command_channel: int = 0
     download_channel: int = 4
+    live_channel: int = 2
     request_timeout: float = 15
     transfer_timeout: float = 120
     allow_invalid_record_dates: bool = False
@@ -61,7 +62,12 @@ class Settings:
     def __post_init__(self):
         if not isinstance(self.allow_invalid_record_dates, bool):
             raise CameraError("config_range", "Recording metadata policy must be a boolean.")
-        numeric_fields = [self.connect_mode, self.command_channel, self.download_channel]
+        numeric_fields = [
+            self.connect_mode,
+            self.command_channel,
+            self.download_channel,
+            self.live_channel,
+        ]
         if (
             any(not 0 <= value <= 255 for value in numeric_fields)
             or not 0 <= self.user_id <= 0xFFFFFFFF
@@ -121,6 +127,7 @@ class Settings:
             data_root=(path.parent / cfg.get("data_root", "../data")).resolve(),
             command_channel=int(channels.get("command", 0)),
             download_channel=int(channels.get("download", 4)),
+            live_channel=int(channels.get("live", 2)),
             request_timeout=float(cfg.get("request_timeout", 15)),
             transfer_timeout=float(cfg.get("transfer_timeout", 120)),
             allow_invalid_record_dates=cfg.get("allow_invalid_record_dates", False),

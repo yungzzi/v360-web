@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-29",
+  "scope": "local WSL x86_64; real remote camera; native-arm64 backend",
+  "camera": {
+    "frames": 118,
+    "source_bytes": 185146,
+    "codec": "hevc",
+    "width": 640,
+    "height": 360,
+    "capture_elapsed_seconds": 8.222,
+    "stop_requested": true,
+    "audio": false
+  },
+  "preview": {
+    "codec": "h264",
+    "seconds": 7.866667,
+    "frame_rate": "15",
+    "timing": "bitstream_frame_rate",
+    "full_decode_passed": true
+  },
+  "http": {
+    "unauthorized_status": 401,
+    "authorized_status": 200,
+    "sha256_matches": true,
+    "range_status": 206,
+    "range_matches": true
+  },
+  "probe_cleanup": {
+    "force_close_ret": 0,
+    "deinitialize_ret": 0
+  },
+  "limitations": [
+    "bounded live capture, not continuous browser playback",
+    "only HEVC codec 5 and subchannel 0 accepted",
+    "coarse wire PTS retained privately; preview uses bitstream frame rate",
+    "no PTZ motor operation performed",
+    "Aliyun deployment, cold wake and unattended use not validated"
+  ]
+}

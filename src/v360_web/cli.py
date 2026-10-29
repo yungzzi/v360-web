@@ -48,6 +48,9 @@ def main():
     listing.add_argument("--end", type=datetime.fromisoformat, required=True)
     download = commands.add_parser("download")
     download.add_argument("recording_id")
+    live = commands.add_parser("live-capture", help="Capture a bounded video-only live preview")
+    live.add_argument("--seconds", type=float, default=10)
+    live.add_argument("--resolution", type=int, choices=range(4), default=2)
     commands.add_parser("recordings")
     inspect = commands.add_parser("probe")
     inspect.add_argument("file", type=Path)
@@ -163,6 +166,10 @@ def main():
             output(service.discover(args.config, args.channel, args.start, args.end))
         elif args.command == "download":
             output(service.download(args.config, args.recording_id))
+        elif args.command == "live-capture":
+            from .live import capture
+
+            output(capture(args.config, args.seconds, args.resolution))
         elif args.command == "recordings":
             settings = Settings.load(args.config)
             output(

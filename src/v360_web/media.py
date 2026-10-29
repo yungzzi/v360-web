@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 from .errors import CameraError
@@ -64,3 +65,59 @@ def validate_decode(path: Path):
         ) from exc
     if result.returncode:
         raise CameraError("media_decode", "Video did not pass an independent decode check.")
+
+
+def make_live_preview(source: Path, target: Path, info: dict):
+    """Time raw HEVC using its bitstream frame rate; wire PTS are coarse device time."""
+    executable = find_tool("ffmpeg")
+    if executable is None:
+        raise CameraError("ffmpeg_missing", "ffmpeg is required for the live preview.")
+    try:
+        video = next(s for s in info["streams"] if s.get("codec_type") == "video")
+        rate = Fraction(video["r_frame_rate"])
+        if not 1 <= rate <= 120:
+            raise ValueError
+    except (KeyError, StopIteration, ValueError, ZeroDivisionError) as exc:
+        raise CameraError(
+            "live_timing", "Live bitstream does not declare a supported frame rate."
+        ) from exc
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-nostdin",
+                "-v",
+                "error",
+                "-xerror",
+                "-n",
+                "-r",
+                str(rate),
+                "-f",
+                "hevc",
+                "-i",
+                str(source),
+                "-map",
+                "0:v:0",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "2",
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(target),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CameraError("live_preview", "Live preview conversion failed or timed out.") from exc
+    if result.returncode:
+        raise CameraError("live_preview", "Live preview conversion failed.")
+    target.chmod(0o600)
+    return {"preview_frame_rate": str(rate), "preview_timing": "bitstream_frame_rate"}
