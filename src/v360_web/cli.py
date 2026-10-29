@@ -102,9 +102,15 @@ def main():
                     input("Device command user ID (0 only when applicable): ")
                 )
                 cfg["device"]["shared"] = input("Shared device? [y/N]: ").lower() == "y"
-            if args.command == "configure-bridge" or not cfg["bridge"].get("token"):
+            if cfg["bridge"].get("adapter") != "native-arm64" and (
+                args.command == "configure-bridge" or not cfg["bridge"].get("token")
+            ):
                 cfg["bridge"]["token"] = getpass.getpass("Private token copied from helper: ")
-            if platform.system() == "Linux" and shutil.which("python.exe"):
+            if (
+                platform.system() == "Linux"
+                and shutil.which("python.exe")
+                and cfg["bridge"].get("adapter", "loopback") in ("loopback", "windows-usb")
+            ):
                 cfg["bridge"].update(
                     adapter="windows-usb", windows_python=shutil.which("python.exe")
                 )
@@ -139,7 +145,7 @@ def main():
             bridge = create_bridge(
                 cfg["host"],
                 cfg["port"],
-                cfg["token"],
+                cfg.get("token", ""),
                 cfg.get("adapter", "loopback"),
                 cfg.get("windows_python", ""),
             )

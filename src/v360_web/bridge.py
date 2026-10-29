@@ -173,6 +173,10 @@ class StdioBridge(AndroidBridge):
 
 
 def create_bridge(host: str, port: int, token: str, kind="loopback", windows_python=""):
+    if kind == "native-arm64":
+        from .native_bridge import NativePPCSBridge
+
+        return NativePPCSBridge()
     if kind == "loopback":
         return AndroidBridge(host, port, token)
     if kind != "windows-usb":

@@ -83,7 +83,11 @@ class Settings:
     def load(cls, path: Path):
         cfg = read_private_json(path)
         device, bridge = cfg.get("device", {}), cfg.get("bridge", {})
-        if not device.get("did") or not device.get("password") or not bridge.get("token"):
+        if (
+            not device.get("did")
+            or not device.get("password")
+            or (bridge.get("adapter", "loopback") != "native-arm64" and not bridge.get("token"))
+        ):
             raise CameraError(
                 "device_not_configured", "Fill device and bridge credentials locally."
             )
@@ -104,7 +108,7 @@ class Settings:
         return cls(
             did=did,
             password=device["password"],
-            bridge_token=bridge["token"],
+            bridge_token=bridge.get("token", ""),
             sdk_init=profiles["initialize"],
             server_key=server_key,
             user_id=int(device.get("user_id", 0)),

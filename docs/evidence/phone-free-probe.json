@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-29",
+  "host_architecture": "x86_64",
+  "kvm_access": false,
+  "execution": "project-local qemu-aarch64 user-mode with private Bionic libraries",
+  "linux_vendor_sdk": "not_obtained_or_verified",
+  "probes": {
+    "version": {
+      "stage": "offline_library_load",
+      "returncode": 0,
+      "stderr_bytes": 205,
+      "adb_used": false,
+      "sdk_initialized": false,
+      "camera_connected": false,
+      "sdk_api_version": 84017664,
+      "matches_phone_reference": true
+    },
+    "initialize": {
+      "stage": "sdk_initialize_deinitialize",
+      "returncode": 0,
+      "stderr_bytes": 205,
+      "adb_used": false,
+      "sdk_initialized": true,
+      "camera_connected": false,
+      "initialize_ret": 0,
+      "deinitialize_ret": 0
+    },
+    "connect": {
+      "stage": "connect",
+      "returncode": 0,
+      "stderr_bytes": 205,
+      "adb_used": false,
+      "sdk_initialized": true,
+      "camera_connected": true,
+      "initialize_ret": 0,
+      "deinitialize_ret": 0,
+      "connect_ret": 1,
+      "force_close_ret": 0,
+      "device_authentication": "not_attempted"
+    }
+  },
+  "production_adapter": "windows-usb; unchanged",
+  "device_login_via_new_path": "not_attempted",
+  "sd_download_via_new_path": "not_attempted",
+  "cloud_server_acceptance": "not_performed",
+  "recording_requirement": "Back up existing motion-triggered and viewing-period clips; continuous recording not required."
+}
