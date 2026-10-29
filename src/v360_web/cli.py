@@ -189,7 +189,7 @@ def main():
             root = (args.config.parent / cfg.get("data_root", "../data")).resolve()
             token = read_private_json(args.config.parent / "web.json")["access_token"]
             app = create_app(root, token, args.config)
-            uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False)
+            uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False, ws_max_size=4096)
     except (EOFError, KeyboardInterrupt):
         output({"error": "cancelled", "message": "Local operation cancelled."})
         return 130

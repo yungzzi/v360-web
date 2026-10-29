@@ -1,4 +1,7 @@
+import asyncio
 import hmac
+import json
+import queue
 import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -7,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -16,6 +19,7 @@ from . import __version__, live, service
 from .config import Settings
 from .errors import CameraError
 from .store import RecordingStore
+from .streaming import StreamManager
 
 
 class ListRequest(BaseModel):
@@ -35,15 +39,41 @@ def create_app(root: Path, access_token: str, config_path: Path | None = None):
     store = RecordingStore(root)
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v360-camera")
     lock = threading.Lock()
+    streams = StreamManager(config_path, lock)
     jobs = {}
     bearer = HTTPBearer(auto_error=False)
 
     @asynccontextmanager
     async def lifespan(app):
         yield
+        await asyncio.to_thread(streams.close)
         pool.shutdown(wait=True, cancel_futures=True)
 
     app = FastAPI(title="V360 recording API", version=__version__, lifespan=lifespan)
+    app.state.streams = streams
+    static = Path(__file__).parent / "web"
+
+    @app.middleware("http")
+    async def private_headers(request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "connect-src 'self'; media-src 'self' blob:; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+        )
+        return response
+
+    @app.get("/", include_in_schema=False)
+    def home():
+        return FileResponse(static / "index.html", media_type="text/html")
+
+    @app.get("/assets/{name}", include_in_schema=False)
+    def asset(name: str):
+        if name not in ("app.js", "style.css"):
+            raise HTTPException(404)
+        return FileResponse(static / name)
 
     def authorize(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
         if credentials is None or not hmac.compare_digest(
@@ -96,7 +126,73 @@ def create_app(root: Path, access_token: str, config_path: Path | None = None):
             "transport": transport,
             "hardware_acceptance": "not_recorded",
             "background_jobs": "memory_only; not resumed after restart",
+            "live": streams.snapshot(),
         }
+
+    @app.websocket("/api/live/ws")
+    async def live_socket(socket: WebSocket):
+        # Browsers authenticate in the first frame; no token in URL or logs.
+        origin = socket.headers.get("origin")
+        scheme = "https" if socket.url.scheme == "wss" else "http"
+        if origin is not None and origin != f"{scheme}://{socket.headers.get('host')}":
+            await socket.close(code=1008)
+            return
+        await socket.accept()
+        viewer = None
+        tasks = []
+        try:
+            raw = await asyncio.wait_for(socket.receive_text(), timeout=5)
+            if len(raw) > 4096:
+                raise ValueError
+            supplied = json.loads(raw).get("token", "")
+            if not isinstance(supplied, str) or not hmac.compare_digest(
+                supplied.encode(), access_token.encode()
+            ):
+                await socket.close(code=1008, reason="Authentication required")
+                return
+            viewer = streams.subscribe()
+            await socket.send_json({"type": "state", "state": "starting"})
+
+            async def send_frames():
+                while not viewer.closed.is_set():
+                    try:
+                        event, value = await asyncio.to_thread(viewer.messages.get, True, 0.5)
+                    except queue.Empty:
+                        continue
+                    if event == "init":
+                        mime, data = value
+                        await asyncio.wait_for(socket.send_json({"type": "init", "mime": mime}), 5)
+                        await asyncio.wait_for(socket.send_bytes(data), 5)
+                    else:
+                        await asyncio.wait_for(socket.send_bytes(value), 5)
+                await socket.send_json({"type": "ended", "error": streams.snapshot()["error"]})
+
+            async def receive_control():
+                while True:
+                    # Socket closure or browser stop releases this subscriber.
+                    await socket.receive_text()
+
+            tasks = [asyncio.create_task(send_frames()), asyncio.create_task(receive_control())]
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        except CameraError as error:
+            await socket.send_json({"type": "error", "error": error.code})
+        except (TimeoutError, ValueError, AttributeError, KeyError, TypeError):
+            await socket.close(code=1008)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if viewer is not None:
+                streams.unsubscribe(viewer)
+            try:
+                await socket.close()
+            except RuntimeError:
+                pass
 
     @app.get("/api/recordings", dependencies=[Depends(authorize)])
     def recordings():
