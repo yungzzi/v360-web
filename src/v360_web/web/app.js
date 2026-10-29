@@ -1,7 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let token = "", socket = null, media = null, source = null, objectURL = null;
-let chunks = [], mime = null, playing = false, requestGeneration = 0;
+let chunks = [], mime = null, playing = false, requestGeneration = 0, serviceStopped = false;
 const labels = {starting:"正在连接",live:"正在观看",stopped:"已停止",failed:"连接失败"};
 const errors = {camera_busy:"摄像头正在处理其他任务，请稍后重试。",viewer_limit:"观看人数已达上限。",session_limit:"本次观看已达 30 分钟，请重新连接。",read_timeout:"摄像头暂时没有返回画面，请重新连接。",sdk_connect:"摄像头连接失败，请稍后重试。",live_sequence:"视频传输中断，请重新连接。"};
 function status(text) {$('notice').textContent=text;}
@@ -35,8 +35,8 @@ function prepare(){
   catch{fail('无法创建视频播放器。');}
 }
 async function poll(){
-  if(!token)return;
-  try{const response=await fetch('/api/status',{headers:{Authorization:'Bearer '+token}});if(response.status===401){logout();return;}if(!response.ok)return;const state=await response.json();$('viewers').textContent=state.live.viewers+' 人';}
+  if(!token || serviceStopped)return;
+  try{const response=await fetch('/api/status',{headers:{Authorization:'Bearer '+token}});if(response.status===401){logout();return;}if(!response.ok)return;const state=await response.json();$('viewers').textContent=state.live.viewers+' 人';$('local-controls').hidden=!state.local_shutdown_available;}
   catch{/* Keep the active player's error reporting independent of status polling. */}
 }
 function logout(){resetPlayer();token='';$('login').hidden=false;$('dashboard').hidden=true;$('logout').hidden=true;$('token').value='';}
@@ -44,7 +44,7 @@ $('login-form').addEventListener('submit',async event=>{
   event.preventDefault();const candidate=$('token').value.trim();
   try{const response=await fetch('/api/status',{headers:{Authorization:'Bearer '+candidate}});
     if(!response.ok){$('login-message').textContent='验证未通过，请检查网页访问令牌。';return;}
-    token=candidate;$('token').value='';$('login').hidden=true;$('dashboard').hidden=false;$('logout').hidden=false;poll();
+    serviceStopped=false;token=candidate;$('token').value='';$('login').hidden=true;$('dashboard').hidden=false;$('logout').hidden=false;poll();
   }catch{$('login-message').textContent='无法连接本地服务，请确认后端正在运行。';}
 });
 $('start').addEventListener('click',()=>{
@@ -69,6 +69,18 @@ $('video').addEventListener('playing',()=>{if(playing){$('empty').hidden=true;$(
 $('video').addEventListener('loadeddata',()=>{if(playing)$('video').play().catch(()=>status('请点击播放器中的播放按钮。'));});
 $('video').addEventListener('error',()=>{if(playing)fail('浏览器无法解码视频，请重新连接。');});
 $('stop').addEventListener('click',()=>resetPlayer());$('logout').addEventListener('click',logout);
+$('shutdown').addEventListener('click',()=>$('shutdown-dialog').showModal());
+$('cancel-shutdown').addEventListener('click',()=>$('shutdown-dialog').close());
+$('confirm-shutdown').addEventListener('click',async()=>{
+  $('confirm-shutdown').disabled=true;
+  try{
+    const response=await fetch('/api/local/shutdown',{method:'POST',headers:{Authorization:'Bearer '+token}});
+    if(!response.ok){status('未能关闭本地后端，仍可在启动终端按 Ctrl+C。');return;}
+    serviceStopped=true;resetPlayer('关闭请求已发送，后端正在结束本次运行。重新启动后再刷新此页面。');
+    $('start').disabled=true;$('shutdown').disabled=true;$('connection').textContent='正在关闭';$('state').textContent='正在关闭';
+  }catch{status('无法确认关闭结果，请查看启动后端的终端。');}
+  finally{$('shutdown-dialog').close();$('confirm-shutdown').disabled=false;}
+});
 $('fullscreen').addEventListener('click',()=>{$('video').requestFullscreen?.().catch(()=>status('当前浏览器无法进入全屏。'));});
 window.addEventListener('pagehide',()=>resetPlayer());
-setInterval(()=>{poll();const v=$('video');if(playing&&v.buffered.length)$('buffer').textContent=Math.max(0,v.buffered.end(v.buffered.length-1)-v.currentTime).toFixed(1)+' 秒';},3000);
+setInterval(()=>{poll();const v=$('video');if(playing&&v.buffered.length)$('buffer').textContent=v.readyState>=3?'正常播放':'正在等待画面';},3000);
