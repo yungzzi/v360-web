@@ -132,7 +132,7 @@ class CameraClient:
                 return events
         raise CameraError("list_unfinished", "Recording list did not receive an end marker.")
 
-    def download(self, channel: int, start: datetime, target: Path, weekday: int = 0):
+    def download(self, channel: int, start: datetime, target: Path, weekday: int = 0, progress=None):
         user_id = 0 if self.settings.shared else self.settings.user_id
         self.send(wire.DOWNLOAD_REQUEST, wire.download_payload(channel, start, user_id, weekday))
         response = self.response(
@@ -143,6 +143,8 @@ class CameraClient:
             raise CameraError(
                 "download_identity", "Device returned a different recording or excessive size."
             )
+        if progress:
+            progress(0, expected)
         deadline = time.monotonic() + self.settings.transfer_timeout
         previous = file_start = None
         written = 0
@@ -174,6 +176,8 @@ class CameraClient:
                 output.write(content)
                 digest.update(content)
                 written += length
+                if progress:
+                    progress(written, expected)
                 previous = sequence
                 if flags & 2:
                     if written != expected:

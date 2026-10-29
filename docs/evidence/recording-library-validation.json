@@ -1,0 +1,16 @@
+{
+  "scope": "local WSL and Edge, real camera recordings",
+  "valid_indexed_records": 194,
+  "catalog_complete": false,
+  "new_original_bytes": 1341646,
+  "preview_seconds": 15.048,
+  "preview_bytes": 1745828,
+  "unauthorized_status": 401,
+  "authorized_status": 200,
+  "range_status": 206,
+  "range_bytes_match": true,
+  "preview_hash_matches": true,
+  "automatic_backup": false,
+  "automatic_cleanup": false,
+  "tests_passed": 86
+}

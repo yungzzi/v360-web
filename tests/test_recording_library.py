@@ -1,0 +1,167 @@
+import hashlib
+from datetime import date, datetime
+from types import SimpleNamespace
+
+import pytest
+from fastapi.testclient import TestClient
+
+from v360_web import playback, progress, service, storage
+from v360_web.api import create_app
+from v360_web.config import write_private_json
+from v360_web.errors import CameraError
+from v360_web.jobs import JobStore
+from v360_web.protocol import RecordingEvent
+from v360_web.store import RecordingStore
+
+TOKEN = "test-library-token-1234567890123456789012345678"
+HEADERS = {"Authorization": "Bearer " + TOKEN}
+
+
+@pytest.fixture
+def prepared(tmp_path, media_bytes, monkeypatch):
+    monkeypatch.setattr(storage.shutil, "disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3))
+    root = tmp_path / "data"
+    store = RecordingStore(root)
+    key = store.discover("MATE-test", 0, [RecordingEvent(datetime(2026, 10, 29, 12), 0, 2, 1, 1)])[
+        0
+    ]
+    source = root / "media" / (key + ".media")
+    source.parent.mkdir()
+    source.write_bytes(media_bytes)
+    store.update(
+        key,
+        "verified",
+        path="media/" + source.name,
+        bytes=len(media_bytes),
+        sha256=hashlib.sha256(media_bytes).hexdigest(),
+    )
+    config = tmp_path / ".private/device.json"
+    write_private_json(config.parent / "sdk-profiles.json", {"initialize": "unused-test-profile"})
+    write_private_json(
+        config,
+        {
+            "device": {"did": "MATE-test", "password": "example"},
+            "bridge": {"adapter": "native-arm64"},
+        },
+    )
+    return root, store, key, config
+
+
+def test_library_date_pagination_and_catalog_boundaries(prepared):
+    root, store, key, config = prepared
+    store.discover("MATE-other", 0, [RecordingEvent(datetime(2026, 10, 29, 13), 0, 2, 1, 1)])
+    store.discover("MATE-test", 0, [RecordingEvent(datetime(2026, 10, 30, 12), 0, 2, 1, 1)])
+    store.save_catalog(
+        "MATE-test",
+        datetime(2026, 10, 29),
+        datetime(2026, 10, 29, 23, 59, 59),
+        {"metadata_complete": False, "invalid_records": 1},
+    )
+    with TestClient(create_app(root, TOKEN, config)) as client:
+        assert client.get("/api/library").status_code == 401
+        response = client.get("/api/library?day=2026-10-29&limit=1", headers=HEADERS).json()
+        assert response["total"] == 1 and response["items"][0]["id"] == key
+        assert "device_id" not in response["items"][0] and "path" not in response["items"][0]
+        assert response["catalog"]["metadata_complete"] is False
+        assert client.get("/api/library?day=bad", headers=HEADERS).status_code == 422
+        assert client.get("/api/library?offset=-1", headers=HEADERS).status_code == 422
+    assert store.catalog("MATE-test", date(2026, 10, 30)) is None
+
+
+def test_browser_preview_media_session_range_and_logout(prepared):
+    root, store, key, config = prepared
+    assert playback.prepare(config, key)["state"] == "ready"
+    assert playback.prepare(config, key)["already_present"]
+    path = playback.ready(root, key)
+    content = path.read_bytes()
+    with TestClient(create_app(root, TOKEN, config)) as client:
+        route = f"/api/recordings/{key}/preview"
+        assert client.get(route).status_code == 401
+        response = client.post("/api/playback/session", headers=HEADERS)
+        assert "HttpOnly" in response.headers["set-cookie"]
+        assert "SameSite=strict" in response.headers["set-cookie"]
+        assert client.get(route).content == content
+        assert client.get(route, headers={'Sec-Fetch-Site':'same-site'}).status_code == 403
+        response = client.get(route, headers={"Range": "bytes=0-31"})
+        assert response.status_code == 206 and response.content == content[:32]
+        # The media cookie cannot authorize camera operations or metadata.
+        assert client.get("/api/library").status_code == 401
+        assert client.post("/api/jobs/list", json={}).status_code == 401
+        assert client.delete("/api/playback/session", headers=HEADERS).status_code == 200
+        assert client.get(route).status_code == 401
+    store.update(key, "verified", sha256="different-source")
+    assert playback.ready(root, key) is None
+
+
+def test_preview_rejects_unverified_and_outside_target(prepared, tmp_path):
+    root, store, key, config = prepared
+    store.update(key, "downloaded_unverified")
+    with pytest.raises(CameraError):
+        playback.prepare(config, key)
+    store.update(key, "verified")
+    directory = root / "previews"
+    directory.mkdir()
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"preserve")
+    (directory / (key + ".partial.mp4")).symlink_to(outside)
+    with pytest.raises(CameraError):
+        playback.prepare(config, key)
+    assert outside.read_bytes() == b"preserve"
+
+
+def test_storage_budget_and_free_reserve_preserve_existing_files(tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    media.mkdir()
+    file = media / "existing.media"
+    file.write_bytes(b"1234567")
+    monkeypatch.setattr(storage, "ARCHIVE_LIMIT", 10)
+    monkeypatch.setattr(storage.shutil, "disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3))
+    with pytest.raises(CameraError) as error:
+        storage.admit(tmp_path, 4, "archive")
+    assert error.value.code == "storage_limit" and file.read_bytes() == b"1234567"
+    monkeypatch.setattr(
+        storage.shutil, "disk_usage", lambda _: SimpleNamespace(free=storage.FREE_RESERVE - 1)
+    )
+    with pytest.raises(CameraError) as error:
+        storage.admit(tmp_path, 0, "cache")
+    assert error.value.code == "disk_reserve"
+
+
+def test_persisted_jobs_recover_interrupted_without_restarting_work(tmp_path):
+    jobs = JobStore(tmp_path)
+    jobs.update_job("done", state="complete", result={"saved": True})
+    jobs.update_job("interrupted", state="running", progress={"stage": "downloading", "bytes": 42})
+    with TestClient(create_app(tmp_path, TOKEN)) as client:
+        value = client.get("/api/jobs/interrupted", headers=HEADERS).json()
+        assert value["state"] == "failed" and value["error"] == "interrupted"
+        assert value["progress"]["bytes"] == 42
+        assert client.get("/api/jobs/done", headers=HEADERS).json()["result"]["saved"]
+
+
+def test_download_job_persists_progress(tmp_path, monkeypatch):
+    def download(config, key):
+        progress.report("downloading", bytes=30, total=100)
+        return {"id": key, "state": "verified"}
+
+    monkeypatch.setattr(service, "download", download)
+    app = create_app(tmp_path, TOKEN, tmp_path / "not-read.json")
+    with TestClient(app) as client:
+        job = client.post("/api/jobs/download/example", headers=HEADERS).json()
+    value = JobStore(tmp_path).get_job(job["id"])
+    assert value["state"] == "complete" and value["progress"] == {
+        "stage": "downloading",
+        "bytes": 30,
+        "total": 100,
+    }
+
+
+def test_downloaded_file_validation_resumes_without_camera(prepared, monkeypatch):
+    _root, store, key, config = prepared
+    store.update(key, "downloaded_unverified")
+
+    def forbidden(*args):
+        raise AssertionError("Existing complete file must not be downloaded again")
+
+    monkeypatch.setattr(service, "CameraClient", forbidden)
+    assert service.download(config, key)["rechecked_local_file"]
+    assert store.get(key)["state"] == "verified"
