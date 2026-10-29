@@ -39,7 +39,13 @@ uv run v360 bridge-check
 
 实际结构是：WSL 程序 → Windows Python 私有标准输入/输出管道 → Windows ADB 的回环转发 → 手机助手 → PPCS 库。
 
-这套 WSL/Windows 管道已使用本机测试对端验证，手机端 SDK 加载仍须完成本步骤后确认。
+这套 WSL/Windows 管道已完成真实手机配对和 SDK 状态检查。2026-10-29 的设备底层连接记录见 `docs/validation.md`；重新接入时仍需执行 `bridge-check` 确认当前状态。
+
+## 重新连接 USB 后
+
+通常无需重新安装或配对。插线并确认调试授权，打开助手并在需要时点 **Start bridge**；在 Windows PowerShell 再执行前面的 `forward` 命令，然后在 WSL 执行 `uv run v360 bridge-check`。已有对应转发时脚本会提示已配置。
+
+拔线或重启通常保留配对令牌。助手数据清除或令牌变化后才需重新配对。当前手机是开发桥接工具，拔线期间后端无法通过它访问摄像头。
 
 ## 3. 摄像头验证是后续独立步骤
 
