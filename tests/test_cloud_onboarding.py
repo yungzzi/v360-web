@@ -41,9 +41,9 @@ def configured(tmp_path):
 
 def device_row(did=DEVICE):
     return {
-        "did": cloud.encrypt_text(did, PROFILE),
+        "uid": cloud.encrypt_text(did, PROFILE),
         "pwd": cloud.encrypt_text(DEVICE_PASSWORD, PROFILE),
-        "isSharedDev": "0",
+        "isShareDevice": "false",
     }
 
 
@@ -216,8 +216,20 @@ def test_device_match_failure_preserves_session_and_can_resume_without_password(
 
 def test_diagnostic_distinguishes_bad_ciphertext_from_different_device(tmp_path):
     path = configured(tmp_path)
-    rows = [device_row("BFEP-unrelated-camera"), {"did": "invalid ciphertext", "pwd": "private"}]
+    rows = [device_row("BFEP-unrelated-camera"), {"uid": "invalid ciphertext", "pwd": "private"}]
     with pytest.raises(CameraError, match="returned=2, decoded=1, matched=0"):
         cloud.import_device(path, rows, {"user_id": 12345}, PROFILE)
     text = (tmp_path / "cloud-import-diagnostic.json").read_text()
     assert "BFEP" not in text and "private" not in text and "ciphertext" not in text
+
+
+def test_raw_gson_wire_fields_import_shared_device(tmp_path):
+    path = configured(tmp_path)
+    row = device_row()
+    row.update(name="fake camera", type="fake LTE type", isShareDevice="true")
+    assert "did" not in row and "isSharedDev" not in row
+    cloud.import_device(path, [row], {"user_id": 12345}, PROFILE)
+    cfg = read_private_json(path)
+    assert cfg["device"]["did"] == DEVICE
+    assert cfg["device"]["shared"] is True
+    assert cfg["device"]["password"] == DEVICE_PASSWORD
