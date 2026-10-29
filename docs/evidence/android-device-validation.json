@@ -23,9 +23,9 @@
     "native_force_close_ret": "not_recorded",
     "active_sessions_after_close": 0
   },
-  "device_authentication": "not_attempted_missing_credentials",
-  "sd_list": "not_attempted",
-  "sd_download": "not_attempted",
+  "device_authentication": "accepted",
+  "sd_list": "received_with_invalid_record_dates",
+  "sd_download": "one_clip_full_decode_verified",
   "continuous_recording": "not_verified",
   "constraints": [
     "The transport test sent no device login or camera configuration command.",

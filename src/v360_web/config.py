@@ -56,8 +56,11 @@ class Settings:
     download_channel: int = 4
     request_timeout: float = 15
     transfer_timeout: float = 120
+    allow_invalid_record_dates: bool = False
 
     def __post_init__(self):
+        if not isinstance(self.allow_invalid_record_dates, bool):
+            raise CameraError("config_range", "Recording metadata policy must be a boolean.")
         numeric_fields = [self.connect_mode, self.command_channel, self.download_channel]
         if (
             any(not 0 <= value <= 255 for value in numeric_fields)
@@ -116,6 +119,7 @@ class Settings:
             download_channel=int(channels.get("download", 4)),
             request_timeout=float(cfg.get("request_timeout", 15)),
             transfer_timeout=float(cfg.get("transfer_timeout", 120)),
+            allow_invalid_record_dates=cfg.get("allow_invalid_record_dates", False),
         )
 
 
