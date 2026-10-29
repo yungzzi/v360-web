@@ -221,7 +221,8 @@ def import_device(config_path: Path, rows: list, identity: dict, profile: dict) 
             invalid += 1
             continue
         try:
-            did = decrypt_text(row.get("did"), profile)
+            # Gson @SerializedName("uid") maps the wire field to Device.did.
+            did = decrypt_text(row.get("uid"), profile)
         except CameraError:
             invalid += 1
             continue
@@ -246,7 +247,8 @@ def import_device(config_path: Path, rows: list, identity: dict, profile: dict) 
     cfg["device"].update(
         password=decrypt_text(device.get("pwd"), profile),
         user_id=identity["user_id"],
-        shared=_shared(device.get("isSharedDev")),
+        # Gson @SerializedName("isShareDevice") maps to Device.isSharedDev.
+        shared=_shared(device.get("isShareDevice")),
     )
     temporary = config_path.with_name(config_path.name + ".cloud-" + secrets.token_hex(8))
     try:

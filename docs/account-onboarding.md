@@ -12,6 +12,8 @@ uv run v360 import-cloud-apk /path/to/the/analyzed.apk
 
 目标 DID 必须已保存在 `.private/device.json`。导入只匹配该 DID；没有匹配或存在多个匹配都会停止，保留原配置。
 
+设备列表的原始 JSON 字段由原 App 的 Gson 注解映射：`uid` 对应内部 `did`，`isShareDevice` 对应内部 `isSharedDev`。2026-10-29 已用真实账号缓存验证：返回 1 台设备，解码并唯一匹配已保存 DID，设备参数成功导入，随后摄像头登录认证通过。原始 JSON 和凭据仍只保存在本地私有目录。
+
 ## 用户仅需输入一次账号密码
 
 在 WSL 终端运行：
