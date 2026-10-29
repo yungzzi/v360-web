@@ -199,6 +199,15 @@ def _shared(value) -> bool:
     raise CameraError("cloud_device", "Device sharing flag is invalid.")
 
 
+def _save_private(path: Path, value: dict) -> None:
+    temporary = path.with_name(path.name + ".new-" + secrets.token_hex(8))
+    try:
+        write_private_json(temporary, value)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def import_device(config_path: Path, rows: list, identity: dict, profile: dict) -> None:
     _key(profile)
     cfg = read_private_json(config_path)
@@ -206,18 +215,32 @@ def import_device(config_path: Path, rows: list, identity: dict, profile: dict) 
     if not expected:
         raise CameraError("cloud_target", "Identify the camera DID locally before account import.")
     matched = []
+    decoded = invalid = 0
     for row in rows:
         if not isinstance(row, dict):
+            invalid += 1
             continue
         try:
             did = decrypt_text(row.get("did"), profile)
         except CameraError:
+            invalid += 1
             continue
+        decoded += 1
         if did == expected:
             matched.append(row)
+    diagnostic = {
+        "returned_devices": len(rows),
+        "decoded_dids": decoded,
+        "invalid_did_fields": invalid,
+        "matching_devices": len(matched),
+    }
+    _save_private(config_path.parent / "cloud-import-diagnostic.json", diagnostic)
     if len(matched) != 1:
         raise CameraError(
-            "cloud_target", "Expected exactly one account device matching the saved DID."
+            "cloud_target",
+            "Expected exactly one account device matching the saved DID "
+            f"(returned={len(rows)}, decoded={decoded}, matched={len(matched)}). "
+            "Camera configuration was preserved; use cloud-import after diagnosis.",
         )
     device = matched[0]
     cfg["device"].update(
@@ -247,13 +270,37 @@ def onboard(config_path: Path, account: str, password: str, progress=None) -> No
     if progress:
         progress("Logging in to the V360 Pro account service...")
     identity = client.login(account, password, phone_uuid)
+    # Preserve the accepted session even if listing/decoding fails afterwards.
+    _save_private(session_path, identity)
     if progress:
         progress("Fetching account devices and matching the saved camera DID...")
     rows = client.devices(identity["token"])
+    _save_private(
+        config_path.parent / "cloud-devices.json",
+        {"user_id": identity["user_id"], "fetched_at_unix": int(time.time()), "devices": rows},
+    )
     import_device(config_path, rows, identity, profile)
-    temporary = session_path.with_name(session_path.name + ".new-" + secrets.token_hex(8))
-    try:
-        write_private_json(temporary, identity)
-        temporary.replace(session_path)
-    finally:
-        temporary.unlink(missing_ok=True)
+
+
+def resume_import(config_path: Path, cached: bool = False) -> None:
+    cfg = read_private_json(config_path)
+    identity = read_private_json(config_path.parent / "cloud-session.json")
+    profile = read_private_json(config_path.parent / "cloud-profile.json")
+    cache_path = config_path.parent / "cloud-devices.json"
+    if cached:
+        cache = read_private_json(cache_path)
+        if cache.get("user_id") != identity["user_id"] or not isinstance(
+            cache.get("devices"), list
+        ):
+            raise CameraError(
+                "cloud_cache", "Cached devices do not belong to the saved account session."
+            )
+        rows = cache["devices"]
+    else:
+        client = CloudClient(profile, cfg.get("cloud_headers"))
+        rows = client.devices(identity["token"])
+        _save_private(
+            cache_path,
+            {"user_id": identity["user_id"], "fetched_at_unix": int(time.time()), "devices": rows},
+        )
+    import_device(config_path, rows, identity, profile)

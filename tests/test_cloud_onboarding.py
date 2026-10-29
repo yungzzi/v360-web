@@ -179,3 +179,45 @@ def test_failed_login_does_not_echo_server_secrets(tmp_path, monkeypatch, capsys
     assert len(opener.requests) == 1  # No password guessing or automatic retry.
     assert path.read_bytes() == before
     assert not (tmp_path / "cloud-session.json").exists()
+
+
+def test_device_match_failure_preserves_session_and_can_resume_without_password(
+    tmp_path, monkeypatch
+):
+    path = configured(tmp_path)
+    before = path.read_bytes()
+    opener = FakeOpener(
+        [{"code": 200, "data": {"token": TOKEN, "id": 12345}}, {"code": 200, "data": []}]
+    )
+    monkeypatch.setattr(cloud.urllib.request, "build_opener", lambda *_: opener)
+    with pytest.raises(CameraError, match="returned=0, decoded=0, matched=0"):
+        cloud.onboard(path, "fake-account", ACCOUNT_PASSWORD)
+    assert path.read_bytes() == before
+    assert read_private_json(tmp_path / "cloud-session.json")["token"] == TOKEN
+    assert read_private_json(tmp_path / "cloud-devices.json")["devices"] == []
+    assert read_private_json(tmp_path / "cloud-import-diagnostic.json") == {
+        "returned_devices": 0,
+        "decoded_dids": 0,
+        "invalid_did_fields": 0,
+        "matching_devices": 0,
+    }
+    resumed = FakeOpener([{"code": 200, "data": [device_row()]}])
+    monkeypatch.setattr(cloud.urllib.request, "build_opener", lambda *_: resumed)
+    cloud.resume_import(path)
+    assert len(resumed.requests) == 1
+    assert resumed.requests[0].full_url.endswith("/device/suit/queryDevs.html")
+    assert read_private_json(path)["device"]["password"] == DEVICE_PASSWORD
+    # Cached retry must not log in or issue any network request.
+    monkeypatch.setattr(
+        cloud.urllib.request, "build_opener", lambda *_: pytest.fail("Network used")
+    )
+    cloud.resume_import(path, cached=True)
+
+
+def test_diagnostic_distinguishes_bad_ciphertext_from_different_device(tmp_path):
+    path = configured(tmp_path)
+    rows = [device_row("BFEP-unrelated-camera"), {"did": "invalid ciphertext", "pwd": "private"}]
+    with pytest.raises(CameraError, match="returned=2, decoded=1, matched=0"):
+        cloud.import_device(path, rows, {"user_id": 12345}, PROFILE)
+    text = (tmp_path / "cloud-import-diagnostic.json").read_text()
+    assert "BFEP" not in text and "private" not in text and "ciphertext" not in text
