@@ -1,6 +1,8 @@
 #!/bin/sh
+# v360-web managed hook
 set -eu
-test -f "$(git rev-parse --git-path MERGE_HEAD)" || {
-    echo 'Expected a non-fast-forward merge commit.' >&2
+# Successful automatic merges invoke this hook before MERGE_HEAD is written.
+test "$(git config --get merge.ff)" = false || {
+    echo 'Configure merge.ff=false and use git merge --no-ff.' >&2
     exit 1
 }

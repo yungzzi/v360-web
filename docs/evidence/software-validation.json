@@ -1,0 +1,59 @@
+{
+  "date": "2026-10-29",
+  "scope": "software checks; no camera acceptance",
+  "python_tests": {
+    "passed": 21,
+    "hardware_peer": "synthetic TCP fixtures"
+  },
+  "wsl_windows_stdio_roundtrip": "passed with Windows-local synthetic peer",
+  "ruff": "passed",
+  "pairing_gate_java": "closed, format, one-use, expiry, attempt limit, reset passed",
+  "git_policy": {
+    "isolated_temporary_repository": true,
+    "direct_main_commit_blocked": true,
+    "no_ff_merge_parent_count": 2
+  },
+  "http_api": {
+    "real_http_server": true,
+    "health": {
+      "service": "v360-web",
+      "version": "0.1.0"
+    },
+    "unauthenticated_status": 401,
+    "authorized_status": {
+      "camera_configured": false,
+      "camera_connection_state": "not_polled",
+      "transport": "android_usb_bridge",
+      "hardware_acceptance": "not_recorded",
+      "background_jobs": "memory_only; not resumed after restart"
+    }
+  },
+  "android_build": {
+    "apk": "v360-usb-bridge-0.1.0.apk",
+    "sha256": "4fbacfc7f46c932cb857e65891a345661489db2a68488d10ac5f0842605ad9d7",
+    "bytes": 467493,
+    "signature_verification": "Verifies\nVerified using v1 scheme (JAR signing): false\nVerified using v2 scheme (APK Signature Scheme v2): true\nVerified using v3 scheme (APK Signature Scheme v3): true\nVerified using v3.1 scheme (APK Signature Scheme v3.1): false\nVerified using v4 scheme (APK Signature Scheme v4): false\nVerified for SourceStamp: false\nNumber of signers: 1\n",
+    "sdk_libraries": [
+      {
+        "abi": "arm64-v8a",
+        "sha256": "1bcdf00f6f7dac8e493907374be3abffdf2dbd7274d0d8dffcbaad009ef6a8e6"
+      },
+      {
+        "abi": "armeabi-v7a",
+        "sha256": "389ace239ba6722407abf8264f05004dfaaa19eb515e9f57172531a2466a85a2"
+      }
+    ],
+    "java_sources": {
+      "android/src/com/p2p/pppp_api/PPCS_APIs.java": "0903491d78c941fbc177db2f2f39c0a11e9d207f780127e652cbd4ac02d6de4a",
+      "android/src/org/v360web/bridge/BridgeService.java": "2c618588db8d968b3856090a8f98271885d18d443dff2506eff8d73939592361",
+      "android/src/org/v360web/bridge/MainActivity.java": "e5bf4d7deb0842b0c6e7e8db47d2525b268beafebbda6827599a1e39ba89bb8c",
+      "android/src/org/v360web/bridge/PairingGate.java": "a8111e0ee52eb8ea8fe82b73d72dfc432def86f6bda0500da37d2ef292f44025"
+    },
+    "device_installation": "not performed",
+    "camera_acceptance": "not performed"
+  },
+  "phone_installation": "not performed",
+  "camera_connection": "not attempted",
+  "merge_to_main": "not performed; real-device milestone pending",
+  "cli_pairing_preservation": "passed; device configuration preserves pairing and does not print credentials"
+}

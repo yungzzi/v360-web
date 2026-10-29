@@ -1,0 +1,28 @@
+{
+  "updates": [
+    {
+      "elapsed": 9.51,
+      "percent": 56,
+      "updated_at": 1793267176.1967888
+    },
+    {
+      "elapsed": 309.77,
+      "percent": 30,
+      "updated_at": 1793267476.1769476
+    }
+  ],
+  "after_stop": {
+    "state": "stopped",
+    "viewers": 0,
+    "error": null,
+    "frames": 4636,
+    "fragments": 308,
+    "audio": false,
+    "session_limit_seconds": 1800
+  },
+  "control_error": null,
+  "thread_stopped": true,
+  "scope": "Local WSL, real remote camera, 315 seconds; not cloud or endurance acceptance",
+  "software_checks": 79,
+  "ptz": "Real browser directional taps; horizontal scene displacement observed; vertical travel not measured"
+}

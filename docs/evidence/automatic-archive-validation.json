@@ -1,0 +1,21 @@
+{
+  "scope": "WSL local backend and Edge, real battery camera",
+  "trigger": "normal CLI startup, no per-recording download request",
+  "automatic_scheduler_started": true,
+  "verified_before": 6,
+  "verified_after": 8,
+  "automatic_saved": 2,
+  "automatic_original_bytes": 2870122,
+  "catalog_records": 218,
+  "catalog_complete": false,
+  "archive_bytes_after": 11294829,
+  "playback_seconds": 15.061,
+  "browser_ready_state": 4,
+  "pin_and_unpin_observed": true,
+  "pause_and_resume_observed": true,
+  "profile_persisted": "local",
+  "real_cleanup_pressure_tested": false,
+  "cloud_deployment_tested": false,
+  "tests_passed": 99,
+  "backend_shutdown_clean": true
+}

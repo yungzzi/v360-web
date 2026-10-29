@@ -16,3 +16,13 @@
 - Distinguish static source evidence, automated software checks and actual camera acceptance. Simulated bridge checks are not camera acceptance.
 - The user is away from the camera. Routine development must not require physical camera access or technical work by family members.
 - Initial remote validation should preserve camera configuration and release sessions after use.
+
+## User-facing preferences
+
+- Use a light interface as the default; the user dislikes the dark theme.
+- Explain progress through functions and observable results. Minimize audio/video jargon;
+  explain a necessary term briefly instead of assuming specialist knowledge.
+- Battery display uses a battery icon plus percentage. While watching, query every
+  five minutes on the existing session; stop querying when no viewers remain.
+  Avoid extra camera connections solely to refresh a battery reading.
+- Clearly distinguish stopping viewing, logging out, and shutting down the local backend.

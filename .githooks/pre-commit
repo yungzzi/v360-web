@@ -1,4 +1,5 @@
 #!/bin/sh
+# v360-web managed hook
 set -eu
 branch=$(git symbolic-ref --quiet --short HEAD || true)
 if [ "$branch" = main ] && [ ! -f "$(git rev-parse --git-path MERGE_HEAD)" ]; then

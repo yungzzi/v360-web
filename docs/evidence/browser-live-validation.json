@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-29",
+  "scope": "local WSL native-arm64 backend and Windows Edge browser",
+  "camera_source": "real remote camera, after separate recorded-source player check",
+  "video": {
+    "width": 640,
+    "height": 360,
+    "nominal_fps": 15,
+    "codec": "h264",
+    "audio": false
+  },
+  "real_session": {
+    "frames": 1222,
+    "fragments": 81,
+    "simultaneous_viewers": 2,
+    "late_join_playback_verified": true
+  },
+  "owned_pipeline": {
+    "camera_workers": 1,
+    "encoders": 1
+  },
+  "after_last_viewer": {
+    "state": "stopped",
+    "viewers": 0,
+    "error": null,
+    "direct_child_processes": 0
+  },
+  "short_local_sample": {
+    "seconds": 4,
+    "summed_rss_mib": 141.5,
+    "cpu_one_core_percent": 7.5,
+    "peak_measurement": false,
+    "rss_may_double_count_shared_pages": true
+  },
+  "not_validated": [
+    "Aliyun runtime and resource limits",
+    "long duration reliability",
+    "independent cold wake",
+    "PTZ",
+    "mobile browser",
+    "public HTTPS reverse proxy"
+  ],
+  "storage_note": "Live stream is memory-only; recording quota and retention are not implemented here.",
+  "software_checks": {
+    "pytest_passed": 72,
+    "ruff": "passed",
+    "wheel_build": "passed",
+    "wheel_assets": "present"
+  },
+  "disconnect_regression": {
+    "repeated_runs": 5,
+    "test_executions": 10,
+    "passed": true,
+    "actual_wsproto_recorded_input_tracebacks": 0
+  }
+}
