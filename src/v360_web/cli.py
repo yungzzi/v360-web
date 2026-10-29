@@ -36,6 +36,8 @@ def main():
     commands.add_parser("bridge-check")
     commands.add_parser("connect-check")
     commands.add_parser("cloud-login")
+    cloud_resume = commands.add_parser("cloud-import")
+    cloud_resume.add_argument("--cached", action="store_true")
     cloud_import = commands.add_parser("import-cloud-apk")
     cloud_import.add_argument("apk", type=Path)
     imported = commands.add_parser("import-apk")
@@ -74,6 +76,11 @@ def main():
             output(import_apk(args.apk, args.config.parent))
         elif args.command == "import-cloud-apk":
             output(import_cloud_profile(args.apk, args.config.parent))
+        elif args.command == "cloud-import":
+            from .cloud import resume_import
+
+            resume_import(args.config, cached=args.cached)
+            output({"device_credentials_imported": True, "camera_connection": "not_attempted"})
         elif args.command == "cloud-login":
             from .cloud import onboard
 
