@@ -6,6 +6,7 @@ from pathlib import Path
 from .client import CameraClient
 from .config import Settings
 from .errors import CameraError
+from .maintenance import cleanup
 from .media import probe, validate_decode
 from .progress import report
 from .storage import admit, check_free
@@ -14,6 +15,7 @@ from .store import RecordingStore
 
 def discover(config_path: Path, channel: int, start: datetime, end: datetime):
     settings = Settings.load(config_path)
+    report("querying")
     with CameraClient(settings) as camera:
         events = camera.list_recordings(channel, start, end)
     store = RecordingStore(settings.data_root)
@@ -66,11 +68,16 @@ def download(config_path: Path, key: str):
         nonlocal last_report
         now = time.monotonic()
         if not written or written == total or now - last_report >= 0.5:
+            report("downloading", bytes=written, total=total)
             if not written:
+                cleanup(
+                    store.root,
+                    max(0, total - (temporary.stat().st_size if temporary.exists() else 0)),
+                    protected=key,
+                )
                 admit(store.root, total, "archive", replacing=temporary)
             else:
                 check_free(store.root, total - written)
-            report("downloading", bytes=written, total=total)
             last_report = now
 
     report("connecting")

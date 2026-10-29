@@ -10,6 +10,7 @@ from . import protocol as wire
 from .bridge import create_bridge
 from .config import Settings
 from .errors import CameraError
+from .progress import cancel_event, check_cancelled
 
 
 class CameraClient:
@@ -23,6 +24,8 @@ class CameraClient:
             settings.windows_python,
         )
         self.session = None
+        if cancel_event.get() is not None:
+            self.bridge.timeout = min(self.bridge.timeout, 10)
         self.last_list_diagnostics = {"invalid_records": 0, "metadata_complete": True}
 
     def __enter__(self):
@@ -30,6 +33,7 @@ class CameraClient:
             self.bridge.open()
             self.bridge.initialize(self.settings.sdk_init)
             for attempt in range(2):
+                check_cancelled()
                 try:
                     self.session = self.bridge.connect(
                         self.settings.did, self.settings.connect_mode, self.settings.server_key
@@ -80,6 +84,7 @@ class CameraClient:
 
     def response(self, expected: int, deadline: float):
         for _ in range(1024):
+            check_cancelled()
             header = self.bridge.read_exact(
                 self.session, self.settings.command_channel, 24, deadline
             )
@@ -132,7 +137,9 @@ class CameraClient:
                 return events
         raise CameraError("list_unfinished", "Recording list did not receive an end marker.")
 
-    def download(self, channel: int, start: datetime, target: Path, weekday: int = 0, progress=None):
+    def download(
+        self, channel: int, start: datetime, target: Path, weekday: int = 0, progress=None
+    ):
         user_id = 0 if self.settings.shared else self.settings.user_id
         self.send(wire.DOWNLOAD_REQUEST, wire.download_payload(channel, start, user_id, weekday))
         response = self.response(
@@ -152,6 +159,7 @@ class CameraClient:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with target.open("wb") as output:
             while True:
+                check_cancelled()
                 header = self.bridge.read_exact(
                     self.session, self.settings.download_channel, 12, deadline
                 )
