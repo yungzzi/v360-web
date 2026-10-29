@@ -1,0 +1,34 @@
+{
+  "observed_at_utc": "2026-10-29T04:37:10Z",
+  "phone_model": "RMX3700",
+  "original_app": {
+    "package": "com.dayunlinks.cloudbirds",
+    "reported_version": "7.2.0",
+    "reported_version_code": 706
+  },
+  "bridge_status": {
+    "ok": true,
+    "version": 1,
+    "sdk_api_version": 84017664,
+    "active_sessions": 0
+  },
+  "sdk_initialize_ret": 0,
+  "device_transport": {
+    "did_prefix": "BFEP",
+    "connect_mode": 94,
+    "mode_source": "Analyzed APK DeviceUtil.getConnectMode: LTE branch returns 94",
+    "connected": true,
+    "elapsed_seconds_single_trial": 2.97,
+    "close_ret": 0,
+    "active_sessions_after_close": 0
+  },
+  "device_authentication": "not_attempted_missing_credentials",
+  "sd_list": "not_attempted",
+  "sd_download": "not_attempted",
+  "continuous_recording": "not_verified",
+  "constraints": [
+    "The transport test sent no device login or camera configuration command.",
+    "Original App had recently accessed device settings; cold deep-sleep wake is not established.",
+    "No inference of sustained reliability or 24-hour coverage from this single connection."
+  ]
+}
