@@ -35,6 +35,7 @@ def main():
     commands.add_parser("pair-bridge")
     commands.add_parser("bridge-check")
     commands.add_parser("connect-check")
+    commands.add_parser("battery")
     commands.add_parser("cloud-login")
     cloud_resume = commands.add_parser("cloud-import")
     cloud_resume.add_argument("--cached", action="store_true")
@@ -165,6 +166,10 @@ def main():
 
             with CameraClient(Settings.load(args.config)):
                 output({"device_authentication": "accepted", "video_retrieval": "not_attempted"})
+        elif args.command == "battery":
+            from .battery import refresh
+
+            output(refresh(args.config))
         elif args.command == "list":
             output(service.discover(args.config, args.channel, args.start, args.end))
         elif args.command == "download":

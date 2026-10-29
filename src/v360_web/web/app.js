@@ -36,7 +36,7 @@ function prepare(){
 }
 async function poll(){
   if(!token || serviceStopped)return;
-  try{const response=await fetch('/api/status',{headers:{Authorization:'Bearer '+token}});if(response.status===401){logout();return;}if(!response.ok)return;const state=await response.json();$('viewers').textContent=state.live.viewers+' 人';$('local-controls').hidden=!state.local_shutdown_available;}
+  try{const response=await fetch('/api/status',{headers:{Authorization:'Bearer '+token}});if(response.status===401){logout();return;}if(!response.ok)return;const state=await response.json();$('viewers').textContent=state.live.viewers+' 人';const b=state.battery||{};$('battery').textContent=b.percent==null?'未知':b.percent+'%';$('charging').textContent=b.charging==null?'未知':b.charging?'设备报告充电中':'未报告外接充电';$('battery-time').textContent=b.updated_at?new Date(b.updated_at*1000).toLocaleString()+(b.stale?' · 待读取更新':' · 最近读取'):'尚未读取电量';$('local-controls').hidden=!state.local_shutdown_available;}
   catch{/* Keep the active player's error reporting independent of status polling. */}
 }
 function logout(){resetPlayer();token='';$('login').hidden=false;$('dashboard').hidden=true;$('logout').hidden=true;$('token').value='';}
@@ -84,3 +84,23 @@ $('confirm-shutdown').addEventListener('click',async()=>{
 $('fullscreen').addEventListener('click',()=>{$('video').requestFullscreen?.().catch(()=>status('当前浏览器无法进入全屏。'));});
 window.addEventListener('pagehide',()=>resetPlayer());
 setInterval(()=>{poll();const v=$('video');if(playing&&v.buffered.length)$('buffer').textContent=v.readyState>=3?'正常播放':'正在等待画面';},3000);
+
+$('refresh-battery').addEventListener('click',async()=>{
+  $('refresh-battery').disabled=true;
+  try{
+    const response=await fetch('/api/jobs/battery',{method:'POST',headers:{Authorization:'Bearer '+token}});
+    if(response.status===409){status('正在观看或处理其他任务，请停止观看后再读取电量。');return;}
+    if(!response.ok){status('暂时无法读取电量，请稍后重试。');return;}
+    const job=await response.json();status('正在读取电量…');
+    for(let i=0;i<90;i++){
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      if(!token||serviceStopped)return;
+      const result=await fetch('/api/jobs/'+job.id,{headers:{Authorization:'Bearer '+token}});
+      if(!result.ok)throw new Error('job');const value=await result.json();
+      if(value.state==='complete'){await poll();status('电量已读取；15 分钟内重复读取会使用最近结果。');return;}
+      if(value.state==='failed'){status('电量读取失败，保留上次结果。');return;}
+    }
+    status('读取仍在进行，可稍后查看电量更新时间。');
+  }catch{status('无法连接服务，电量保留上次结果。');}
+  finally{$('refresh-battery').disabled=false;}
+});

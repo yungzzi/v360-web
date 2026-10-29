@@ -17,7 +17,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from . import __version__, live, service
+from . import __version__, battery, live, service
 from .config import Settings
 from .errors import CameraError
 from .store import RecordingStore
@@ -122,12 +122,14 @@ def create_app(
     @app.get("/api/status", dependencies=[Depends(authorize)])
     def status(request: Request):
         configured = False
+        battery_status = {"percent": None, "charging": None, "updated_at": None, "stale": True}
         transport = "not_configured"
         if config_path:
             try:
                 settings = Settings.load(config_path)
                 configured = True
                 transport = settings.bridge_kind
+                battery_status = battery.cached(settings)
             except CameraError:
                 pass
         return {
@@ -137,6 +139,7 @@ def create_app(
             "hardware_acceptance": "not_recorded",
             "background_jobs": "memory_only; not resumed after restart",
             "live": streams.snapshot(),
+            "battery": battery_status,
             "local_shutdown_available": local_controls(request),
         }
 
@@ -253,6 +256,10 @@ def create_app(
     @app.post("/api/jobs/live", status_code=202, dependencies=[Depends(authorize)])
     def live_job(body: LiveRequest):
         return submit(live.capture, body.seconds, body.resolution)
+
+    @app.post("/api/jobs/battery", status_code=202, dependencies=[Depends(authorize)])
+    def battery_job():
+        return submit(battery.refresh)
 
     @app.get("/api/live/captures/{key}/file", dependencies=[Depends(authorize)])
     def live_file(key: str):
