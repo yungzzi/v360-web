@@ -205,6 +205,7 @@ def main():
                 token,
                 args.config,
                 shutdown_callback=None if args.no_local_controls else shutdown,
+                start_backup=True,
             )
             server = uvicorn.Server(
                 uvicorn.Config(

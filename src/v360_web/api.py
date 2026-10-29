@@ -27,7 +27,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from . import __version__, battery, live, playback, progress, service, storage
+from . import __version__, battery, live, maintenance, playback, progress, service, storage
+from .backup import BackupManager
 from .config import Settings
 from .errors import CameraError
 from .jobs import JobStore
@@ -51,17 +52,33 @@ class MoveRequest(BaseModel):
     direction: str
 
 
+class BackupRequest(BaseModel):
+    enabled: bool
+    mode: str = Field(pattern=r"^(local|server)$")
+    interval_minutes: int = Field(default=60, ge=15, le=360)
+
+
+class PinRequest(BaseModel):
+    pinned: bool
+
+
 def create_app(
-    root: Path, access_token: str, config_path: Path | None = None, *, shutdown_callback=None
+    root: Path,
+    access_token: str,
+    config_path: Path | None = None,
+    *,
+    shutdown_callback=None,
+    start_backup=False,
 ):
     if len(access_token) < 32:
         raise ValueError("Web access token must contain at least 32 characters")
     store = RecordingStore(root)
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v360-camera")
     lock = threading.Lock()
-    streams = StreamManager(config_path, lock)
     jobs = JobStore(root)
     jobs.recover_interrupted()
+    backup = BackupManager(root, config_path, lock)
+    streams = StreamManager(config_path, lock, before_subscribe=backup.request_yield)
     media_sessions = {}
     bearer = HTTPBearer(auto_error=False)
 
@@ -73,12 +90,16 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
+        if start_backup:
+            backup.start()
         yield
+        await asyncio.to_thread(backup.close)
         await asyncio.to_thread(streams.close)
         pool.shutdown(wait=True, cancel_futures=True)
 
     app = FastAPI(title="V360 recording API", version=__version__, lifespan=lifespan)
     app.state.streams = streams
+    app.state.backup = backup
     static = Path(__file__).parent / "web"
 
     @app.middleware("http")
@@ -118,8 +139,8 @@ def create_app(
         if credentials is not None:
             return authorize(credentials)
         session = request.cookies.get("v360_media", "")
-        if request.headers.get('sec-fetch-site') in ('cross-site', 'same-site'):
-            raise HTTPException(403, 'Same-origin playback required')
+        if request.headers.get("sec-fetch-site") in ("cross-site", "same-site"):
+            raise HTTPException(403, "Same-origin playback required")
         if media_sessions.get(session, 0) <= time.monotonic():
             raise HTTPException(401, "Authentication required")
 
@@ -155,7 +176,8 @@ def create_app(
     def submit(function, *args):
         if config_path is None:
             raise HTTPException(503, "Camera profile has not been configured")
-        if not lock.acquire(blocking=False):
+        backup.request_yield()
+        if not lock.acquire(timeout=1):
             raise HTTPException(409, "A camera operation is already running")
         job_id = secrets.token_hex(16)
         jobs.update_job(job_id, state="queued", kind=function.__name__)
@@ -202,6 +224,7 @@ def create_app(
             "live": streams.snapshot(),
             "battery": battery_status,
             "local_shutdown_available": local_controls(request),
+            "backup": backup.snapshot(),
         }
 
     @app.post("/api/local/shutdown", dependencies=[Depends(authorize)])
@@ -238,7 +261,14 @@ def create_app(
             ):
                 await socket.close(code=1008, reason="Authentication required")
                 return
-            viewer = streams.subscribe()
+            for attempt in range(175):
+                try:
+                    viewer = streams.subscribe()
+                    break
+                except CameraError as error:
+                    if error.code != "camera_busy" or not backup.running or attempt == 174:
+                        raise
+                    await asyncio.sleep(0.2)
             await socket.send_json(
                 {"type": "state", "state": "starting", "viewer_id": viewer.identity}
             )
@@ -326,19 +356,50 @@ def create_app(
 
     @app.get("/api/recordings/{key}/file", dependencies=[Depends(authorize_media)])
     def recording_file(key: str):
+        maintenance.protect(root, key)
         path = store.media_path(key)
         if path is None:
             raise HTTPException(404, "Verified recording not found")
         with path.open("rb") as file:
             suffix = ".mp4" if file.read(12)[4:8] == b"ftyp" else ".media"
-        return FileResponse(path, filename=f"{key}{suffix}")
+        return maintenance.HeldFileResponse(path, root=root, key=key, filename=f"{key}{suffix}")
 
     @app.get("/api/recordings/{key}/preview", dependencies=[Depends(authorize_media)])
     def recording_preview(key: str):
+        maintenance.protect(root, key)
         path = playback.ready(root, key)
         if path is None:
             raise HTTPException(404, "Prepared recording not found")
-        return FileResponse(path, media_type="video/mp4")
+        return maintenance.HeldFileResponse(path, root=root, key=key, media_type="video/mp4")
+
+    @app.post("/api/recordings/{key}/lease", dependencies=[Depends(authorize)])
+    def lease_recording(key: str):
+        if store.get(key) is None:
+            raise HTTPException(404, "Recording not found")
+        maintenance.protect(root, key)
+        return {"protected": True}
+
+    @app.put("/api/recordings/{key}/pin", dependencies=[Depends(authorize)])
+    def pin_recording(key: str, body: PinRequest):
+        if not maintenance.pin(root, key, body.pinned):
+            raise HTTPException(404, "Recording not found")
+        return {"pinned": body.pinned}
+
+    @app.get("/api/backup", dependencies=[Depends(authorize)])
+    def backup_status():
+        return backup.snapshot()
+
+    @app.put("/api/backup", dependencies=[Depends(authorize)])
+    def configure_backup(body: BackupRequest):
+        return backup.configure(body.model_dump())
+
+    @app.post("/api/backup/run", status_code=202, dependencies=[Depends(authorize)])
+    def run_backup():
+        try:
+            backup.run_now()
+        except CameraError as error:
+            raise HTTPException(409, error.code) from error
+        return backup.snapshot()
 
     @app.post("/api/jobs/playback/{key}", status_code=202, dependencies=[Depends(authorize)])
     def prepare_playback(key: str):

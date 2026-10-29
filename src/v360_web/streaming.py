@@ -197,7 +197,9 @@ class Subscriber:
 
 
 class StreamManager:
-    def __init__(self, config: Path | None, camera_lock, source_factory=camera_frames):
+    def __init__(
+        self, config: Path | None, camera_lock, source_factory=camera_frames, before_subscribe=None
+    ):
         self.config = config
         self.camera_lock = camera_lock
         self.source_factory = source_factory
@@ -212,6 +214,7 @@ class StreamManager:
         self.encoder_pid = None
         self.shutdown_requested = False
         self.controls = CameraControls()
+        self.before_subscribe = before_subscribe
 
     def snapshot(self):
         with self.guard:
@@ -223,11 +226,13 @@ class StreamManager:
                 "fragments": self.fragments,
                 "audio": False,
                 "session_limit_seconds": 1800,
-                    "control_error": self.controls.error,
-                    "ptz_active": bool(self.controls.sent),
+                "control_error": self.controls.error,
+                "ptz_active": bool(self.controls.sent),
             }
 
     def subscribe(self):
+        if self.before_subscribe:
+            self.before_subscribe()
         with self.guard:
             if self.shutdown_requested or self.config is None:
                 raise CameraError("stream_unavailable", "Live service is not configured.")

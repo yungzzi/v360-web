@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import Settings, read_private_json, write_private_json
 from .errors import CameraError
+from .maintenance import cleanup, protect
 from .media import find_tool, probe, validate_decode
 from .progress import report
 from .storage import admit, check_free
@@ -54,6 +55,7 @@ def prepare(config: Path, key: str):
     if ready(root, key):
         return {"id": key, "state": "ready", "already_present": True}
     report("preparing_playback")
+    protect(root, key)
     info = probe(source)
     duration = float(info.get("format", {}).get("duration", 0))
     if not math.isfinite(duration) or not 0 < duration <= 3600:
@@ -61,6 +63,12 @@ def prepare(config: Path, key: str):
     reservation = math.ceil(duration * 200000 * 1.3) + 1024**2
     target, manifest, temporary = paths(root, key)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cleanup(
+        root,
+        max(0, reservation - (temporary.stat().st_size if temporary.exists() else 0)),
+        kind="cache",
+        protected=key,
+    )
     admit(root, reservation, "cache", replacing=temporary)
     video = next(s for s in info["streams"] if s["codec_type"] == "video")
     scale = min(1, 1280 / int(video["width"]), 720 / int(video["height"]))

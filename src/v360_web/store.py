@@ -3,9 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+
+MIGRATION_LOCK = threading.RLock()
 
 
 class RecordingStore:
@@ -24,6 +28,19 @@ class RecordingStore:
             db.execute("""CREATE TABLE IF NOT EXISTS catalog_checks (
                 device_id TEXT, start_local TEXT, end_local TEXT, checked_at TEXT,
                 diagnostics TEXT, PRIMARY KEY(device_id,start_local,end_local))""")
+        with MIGRATION_LOCK, self.connection() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(recordings)")}
+            for name, definition in [
+                ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+                ("saved_at", "TEXT"),
+            ]:
+                if name not in columns:
+                    db.execute(f"ALTER TABLE recordings ADD COLUMN {name} {definition}")
+            if "saved_at" not in columns:
+                db.execute(
+                    "UPDATE recordings SET saved_at=updated_at WHERE state='verified' AND saved_at IS NULL"
+                )
+            db.execute("CREATE TABLE IF NOT EXISTS media_leases (id TEXT PRIMARY KEY, until REAL)")
 
     @contextmanager
     def connection(self):
@@ -127,9 +144,28 @@ class RecordingStore:
         if not set(values) <= allowed:
             raise ValueError("Unsupported recording update")
         updates = {"state": state, "updated_at": self.timestamp(), **values}
+        if state == "verified":
+            updates["saved_at"] = self.timestamp()
         with self.connection() as db:
             assignments = ",".join(f"{name}=?" for name in updates)
             db.execute(f"UPDATE recordings SET {assignments} WHERE id=?", [*updates.values(), key])
+
+    def pin(self, key, value):
+        with self.connection() as db:
+            return db.execute(
+                "UPDATE recordings SET pinned=? WHERE id=?", (int(value), key)
+            ).rowcount
+
+    def lease(self, key, seconds=300):
+        with self.connection() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO media_leases VALUES (?,?)", (key, time.time() + seconds)
+            )
+
+    def leased(self, key):
+        with self.connection() as db:
+            row = db.execute("SELECT until FROM media_leases WHERE id=?", (key,)).fetchone()
+        return bool(row and row[0] > time.time())
 
     def media_path(self, key: str):
         item = self.get(key)

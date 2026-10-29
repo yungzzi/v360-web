@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from .errors import CameraError
+from .progress import check_cancelled
 
 MAX_READ = 1024 * 1024
 MAX_LINE = 2 * MAX_READ
@@ -87,6 +88,7 @@ class AndroidBridge:
             raise CameraError("packet_size", "Requested packet exceeds the protocol limit.")
         data = bytearray()
         while len(data) < size:
+            check_cancelled()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise CameraError("read_timeout", "Timed out waiting for a complete PPCS packet.")

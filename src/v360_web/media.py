@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from fractions import Fraction
 from pathlib import Path
 
 from .errors import CameraError
+from .progress import cancel_event, check_cancelled
 
 
 def find_tool(name: str):
@@ -40,6 +42,45 @@ def validate_decode(path: Path):
     executable = find_tool("ffmpeg")
     if executable is None:
         raise CameraError("ffmpeg_missing", "ffmpeg is required for an independent decode check.")
+    check_cancelled()
+    if cancel_event.get() is not None:
+        process = subprocess.Popen(
+            [
+                executable,
+                "-v",
+                "error",
+                "-xerror",
+                "-threads",
+                "1",
+                "-i",
+                str(path),
+                "-map",
+                "0:v:0",
+                "-f",
+                "null",
+                "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + 120
+            while process.poll() is None:
+                check_cancelled()
+                if time.monotonic() > deadline:
+                    raise CameraError("media_decode", "Decode check timed out.")
+                time.sleep(0.2)
+            if process.returncode:
+                raise CameraError("media_decode", "Video did not pass decode validation.")
+            return
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
     try:
         result = subprocess.run(
             [
