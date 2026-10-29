@@ -57,6 +57,73 @@ def test_truncated_list_is_not_accepted_as_complete():
         protocol.parse_list_page(data)
 
 
+@pytest.mark.parametrize("count", [0, 1])
+def test_device_trailing_slot_is_not_read_as_an_event(count):
+    data = struct.pack("<iiiBB2x", 0, count, count, 0, 1)
+    if count:
+        data += TIME + struct.pack("<BBh", 2, 1, 60)
+    # Physical response carried one extra slot; invalid date bytes make accidental
+    # parsing observable rather than silently creating a phantom recording.
+    data += b"\xff" * 12
+    _, _, _, finished, events = protocol.parse_list_page(data)
+    assert finished and len(events) == count
+
+
+def test_oversized_list_padding_is_rejected():
+    data = struct.pack("<iiiBB2x", 0, 0, 0, 0, 1) + bytes(protocol.MAX_COMMAND)
+    with pytest.raises(CameraError, match="length"):
+        protocol.parse_list_page(data)
+
+
+def test_invalid_record_dates_require_opt_in_and_preserve_raw_page(bridge_server, tmp_path):
+    with bridge_server("invalid-record-date") as (port, _):
+        strict = settings(port)
+        strict.data_root = tmp_path
+        with pytest.raises(CameraError, match="calendar"), CameraClient(strict) as camera:
+            camera.list_recordings(2, datetime(2026, 10, 29), datetime(2026, 10, 30))
+        assert not (tmp_path / "protocol-diagnostics").exists()
+        tolerant = settings(port)
+        tolerant.data_root = tmp_path
+        tolerant.allow_invalid_record_dates = True
+        with CameraClient(tolerant) as camera:
+            events = camera.list_recordings(2, datetime(2026, 10, 29), datetime(2026, 10, 30))
+            diagnostic = camera.last_list_diagnostics
+        assert len(events) == 1
+        assert diagnostic == {
+            "invalid_records": 1,
+            "metadata_complete": False,
+            "raw_pages_saved": 1,
+        }
+        raw_files = list((tmp_path / "protocol-diagnostics").glob("*.bin"))
+        assert len(raw_files) == 1
+        assert raw_files[0].stat().st_mode & 0o077 == 0
+        assert raw_files[0].read_bytes() == (
+            struct.pack("<iiiBB2x", 2, 2, 2, 0, 1)
+            + b"\xff" * 12
+            + TIME
+            + struct.pack("<BBh", 2, 1, 60)
+            + bytes(12)
+        )
+
+
+def test_transport_timeout_retries_once_before_sending_login(bridge_server, monkeypatch):
+    monkeypatch.setattr("v360_web.client.time.sleep", lambda _: None)
+    with bridge_server("connect-timeout-once") as (port, state):
+        with CameraClient(settings(port)):
+            pass
+        assert state["connect_calls"] == 2 and state["closed"] == 1
+        assert len(state["writes"]) == 1
+        assert struct.unpack_from("<I", state["writes"][0], 8)[0] == protocol.LOGIN
+
+
+def test_device_authentication_rejection_is_not_retried(bridge_server):
+    with bridge_server("login-rejected") as (port, state):
+        with pytest.raises(CameraError) as exc, CameraClient(settings(port)):
+            pass
+        assert exc.value.code == "device_authentication"
+        assert state["connect_calls"] == 1 and state["closed"] == 1
+
+
 def test_fragmented_rpc_and_partial_sdk_reads_produce_exact_file(
     bridge_server, media_bytes, tmp_path
 ):

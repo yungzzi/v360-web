@@ -1,0 +1,67 @@
+{
+  "observed_date": "2026-10-29",
+  "timezone": "Asia/Hong_Kong",
+  "account_device_import": "accepted_unique_saved_DID",
+  "device_authentication": "accepted",
+  "channels": {
+    "command": 0,
+    "download": 4,
+    "recording": 0
+  },
+  "connect_mode": 94,
+  "list": {
+    "records": 95,
+    "camera_validation": "list_received_with_invalid_records",
+    "invalid_records": 1,
+    "metadata_complete": false,
+    "raw_pages_saved": 1
+  },
+  "first_clip": {
+    "bytes": 1298591,
+    "declared_duration_raw": 15,
+    "container": "mov,mp4,m4a,3gp,3g2,mj2",
+    "streams": [
+      {
+        "type": "video",
+        "codec": "hevc"
+      },
+      {
+        "type": "audio",
+        "codec": "pcm_alaw"
+      }
+    ],
+    "full_decode_passed": true
+  },
+  "compatible_preview": {
+    "duration_seconds": 15.061,
+    "bytes": 2834415,
+    "video": "h264",
+    "audio": "aac",
+    "full_decode_passed": true
+  },
+  "api": {
+    "unauthenticated_media_status": 401,
+    "authenticated_media_status": 200,
+    "range_status": 206,
+    "verified_file_sha_matches": true,
+    "unverified_recording_status": 404,
+    "indexed_records": 95,
+    "transport": "in-process FastAPI TestClient; no public deployment"
+  },
+  "bridge_after_checks": {
+    "ok": true,
+    "sdk_api_version": 84017664,
+    "active_sessions": 0
+  },
+  "software_checks": {
+    "pytest_passed": 41,
+    "ruff": "passed",
+    "warnings": "one Starlette/httpx deprecation"
+  },
+  "unverified": [
+    "Invalid SD record producer cause and complete date coverage",
+    "Cold deep-sleep wake and direct/relay path",
+    "Unattended bridge stability and day/night battery budget",
+    "Live view, PTZ, full web frontend and cloud deployment"
+  ]
+}

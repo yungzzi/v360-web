@@ -55,7 +55,7 @@ def media_bytes(tmp_path_factory):
 def bridge_server(media_bytes):
     @contextmanager
     def start(mode="normal"):
-        state = {"closed": 0, "writes": [], "mode": mode}
+        state = {"closed": 0, "writes": [], "mode": mode, "connect_calls": 0}
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
@@ -70,7 +70,11 @@ def bridge_server(media_bytes):
                             op = request["op"]
                             answer = {"ok": True, "ret": 0}
                             if op == "connect":
-                                answer["session"] = 7
+                                state["connect_calls"] += 1
+                                if mode == "connect-timeout-once" and state["connect_calls"] == 1:
+                                    answer = {"ok": False, "error": "sdk_connect", "ret": -3}
+                                else:
+                                    answer["session"] = 7
                             elif op == "status":
                                 answer["version"] = 1
                             elif op == "close":
@@ -80,12 +84,15 @@ def bridge_server(media_bytes):
                                 state["writes"].append(data)
                                 command = struct.unpack_from("<I", data, 8)[0]
                                 if command == 16:
-                                    buffers[0].extend(frame(16, struct.pack("<i", 0)))
+                                    ret = -2 if mode == "login-rejected" else 0
+                                    buffers[0].extend(frame(16, struct.pack("<i", ret)))
                                 elif command == 792:
                                     record = TIME + bytes([2, 1]) + struct.pack("<h", 60)
-                                    buffers[0].extend(
-                                        frame(793, struct.pack("<iiiBB2x", 2, 1, 1, 0, 1) + record)
-                                    )
+                                    page = struct.pack("<iiiBB2x", 2, 1, 1, 0, 1) + record
+                                    if mode == "invalid-record-date":
+                                        page = struct.pack("<iiiBB2x", 2, 2, 2, 0, 1)
+                                        page += b"\xff" * 12 + record + bytes(12)
+                                    buffers[0].extend(frame(793, page))
                                 elif command == 33068:
                                     start_time = data[28:36]
                                     response = struct.pack("<i", len(media_bytes)) + start_time

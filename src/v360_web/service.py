@@ -14,7 +14,17 @@ def discover(config_path: Path, channel: int, start: datetime, end: datetime):
         events = camera.list_recordings(channel, start, end)
     store = RecordingStore(settings.data_root)
     keys = store.discover(settings.did, channel, events)
-    return {"records": len(keys), "ids": keys, "camera_validation": "list_received"}
+    diagnostics = camera.last_list_diagnostics
+    return {
+        "records": len(keys),
+        "ids": keys,
+        "camera_validation": (
+            "list_received_with_invalid_records"
+            if diagnostics["invalid_records"]
+            else "list_received"
+        ),
+        **diagnostics,
+    }
 
 
 def download(config_path: Path, key: str):

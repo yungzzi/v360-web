@@ -23,14 +23,23 @@ class CameraClient:
             settings.windows_python,
         )
         self.session = None
+        self.last_list_diagnostics = {"invalid_records": 0, "metadata_complete": True}
 
     def __enter__(self):
         try:
             self.bridge.open()
             self.bridge.initialize(self.settings.sdk_init)
-            self.session = self.bridge.connect(
-                self.settings.did, self.settings.connect_mode, self.settings.server_key
-            )
+            for attempt in range(2):
+                try:
+                    self.session = self.bridge.connect(
+                        self.settings.did, self.settings.connect_mode, self.settings.server_key
+                    )
+                    break
+                except CameraError as error:
+                    if error.code != "sdk_connect" or error.sdk_code != -3 or attempt:
+                        raise
+                    # Retry only transport setup, before sending any login command.
+                    time.sleep(1)
             self.send(
                 wire.LOGIN,
                 wire.login_payload(
@@ -86,9 +95,13 @@ class CameraClient:
         self.send(wire.LIST_REQUEST, wire.list_payload(channel, start, end))
         deadline = time.monotonic() + self.settings.request_timeout
         events, seen = [], set()
+        self.last_list_diagnostics = {"invalid_records": 0, "metadata_complete": True}
         for _ in range(1024):
             payload = self.response(wire.LIST_RESPONSE, deadline)
-            response_channel, _total, _index, finished, page = wire.parse_list_page(payload)
+            invalid = [] if self.settings.allow_invalid_record_dates else None
+            response_channel, _total, _index, finished, page = wire.parse_list_page(
+                payload, invalid
+            )
             if response_channel != channel:
                 raise CameraError(
                     "channel_mismatch", "Device replied for a different recording channel."
@@ -97,6 +110,22 @@ class CameraClient:
             if identity not in seen:
                 seen.add(identity)
                 events.extend(page)
+                if invalid:
+                    self.last_list_diagnostics["invalid_records"] += len(invalid)
+                    self.last_list_diagnostics["metadata_complete"] = False
+                    # Preserve a bounded number of malformed pages privately. They
+                    # are never served as recordings by the authenticated media API.
+                    if self.last_list_diagnostics.get("raw_pages_saved", 0) < 4:
+                        root = self.settings.data_root / "protocol-diagnostics"
+                        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        target = root / (identity.hex() + ".bin")
+                        if not target.exists():
+                            with target.open("xb") as output:
+                                output.write(payload)
+                        target.chmod(0o600)
+                        self.last_list_diagnostics["raw_pages_saved"] = (
+                            self.last_list_diagnostics.get("raw_pages_saved", 0) + 1
+                        )
             if len(events) > 100000:
                 raise CameraError("list_size", "Recording query exceeded its supported size.")
             if finished:

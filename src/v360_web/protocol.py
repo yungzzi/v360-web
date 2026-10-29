@@ -67,15 +67,29 @@ class RecordingEvent:
     duration_raw: int
 
 
-def parse_list_page(payload: bytes):
+def parse_list_page(payload: bytes, invalid_records: list | None = None):
     if len(payload) < 16:
         raise CameraError("list_packet", "Recording list header is truncated.")
     channel, total, count, index, endflag = struct.unpack_from("<iiiBB", payload)
-    if count < 0 or count > 80000 or len(payload) != 16 + 12 * count or endflag not in (0, 1):
+    required = 16 + 12 * count
+    if (
+        count < 0
+        or count > 80000
+        or len(payload) < required
+        or len(payload) > MAX_COMMAND
+        or endflag not in (0, 1)
+    ):
         raise CameraError("list_packet", "Recording list length or end flag is invalid.")
     events = []
-    for at in range(16, len(payload), 12):
-        start, weekday = decode_time(payload[at : at + 8])
+    # The shipped constructor reads count records, not all remaining bytes.
+    for at in range(16, required, 12):
+        try:
+            start, weekday = decode_time(payload[at : at + 8])
+        except CameraError:
+            if invalid_records is None:
+                raise
+            invalid_records.append((at - 16) // 12)
+            continue
         event_type, status, duration = struct.unpack_from("<BBh", payload, at + 8)
         events.append(RecordingEvent(start, weekday, event_type, status, duration))
     return channel, total, index, bool(endflag), events
