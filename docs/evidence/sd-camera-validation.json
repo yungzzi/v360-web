@@ -63,5 +63,10 @@
     "Cold deep-sleep wake and direct/relay path",
     "Unattended bridge stability and day/night battery budget",
     "Live view, PTZ, full web frontend and cloud deployment"
-  ]
+  ],
+  "user_review": {
+    "date": "2026-10-29",
+    "assessment": "User reports that the delivered recording appears to match the home camera scene.",
+    "scope": "Single-clip scene review; not full coverage, long-run stability or complete product acceptance."
+  }
 }
