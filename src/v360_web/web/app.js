@@ -2,11 +2,13 @@
 const $ = id => document.getElementById(id);
 let token = "", socket = null, media = null, source = null, objectURL = null;
 let chunks = [], mime = null, playing = false, requestGeneration = 0, serviceStopped = false;
+let viewerId=null;
+const ptzButtons=()=>document.querySelectorAll('[data-direction]');
 const labels = {starting:"正在连接",live:"正在观看",stopped:"已停止",failed:"连接失败"};
 const errors = {camera_busy:"摄像头正在处理其他任务，请稍后重试。",viewer_limit:"观看人数已达上限。",session_limit:"本次观看已达 30 分钟，请重新连接。",read_timeout:"摄像头暂时没有返回画面，请重新连接。",sdk_connect:"摄像头连接失败，请稍后重试。",live_sequence:"视频传输中断，请重新连接。"};
 function status(text) {$('notice').textContent=text;}
 function resetPlayer(message="已停止观看。") {
-  requestGeneration++; playing=false;
+  if(viewerId&&token)sendMove('stop');viewerId=null;ptzButtons().forEach(b=>b.disabled=true);requestGeneration++; playing=false;
   if(socket){const previous=socket;socket=null;previous.close();}
   $('video').pause();$('video').removeAttribute('src');$('video').load();
   if(objectURL)URL.revokeObjectURL(objectURL);
@@ -36,7 +38,7 @@ function prepare(){
 }
 async function poll(){
   if(!token || serviceStopped)return;
-  try{const response=await fetch('/api/status',{headers:{Authorization:'Bearer '+token}});if(response.status===401){logout();return;}if(!response.ok)return;const state=await response.json();$('viewers').textContent=state.live.viewers+' 人';const b=state.battery||{};$('battery').textContent=b.percent==null?'未知':b.percent+'%';$('charging').textContent=b.charging==null?'未知':b.charging?'设备报告充电中':'未报告外接充电';$('battery-time').textContent=b.updated_at?new Date(b.updated_at*1000).toLocaleString()+(b.stale?' · 待读取更新':' · 最近读取'):'尚未读取电量';$('local-controls').hidden=!state.local_shutdown_available;}
+  try{const response=await fetch('/api/status',{headers:{Authorization:'Bearer '+token}});if(response.status===401){logout();return;}if(!response.ok)return;const state=await response.json();$('viewers').textContent=state.live.viewers+' 人';const b=state.battery||{};const pct=b.percent;const fill=$('battery-fill');fill.style.width=pct==null?'0%':Math.max(0,Math.min(100,pct))+'%';$('battery-percent').textContent=pct==null?'—':pct+'%';$('battery-badge').classList.toggle('low',pct!=null&&pct<=20);$('battery-badge').classList.toggle('stale',!!b.stale);$('battery-charge').hidden=b.charging!==true;const batteryLabel=pct==null?'尚未取得电量':'电量 '+pct+'%'+(b.updated_at?'，读取于 '+new Date(b.updated_at*1000).toLocaleString():'');$('battery-badge').setAttribute('aria-label',batteryLabel);$('battery-badge').title=batteryLabel;$('battery').textContent=b.percent==null?'未知':b.percent+'%';$('charging').textContent=b.charging==null?'未知':b.charging?'设备报告充电中':'未报告外接充电';$('battery-time').textContent=b.updated_at?new Date(b.updated_at*1000).toLocaleString()+(b.stale?' · 待读取更新':' · 最近读取'):'尚未读取电量';$('local-controls').hidden=!state.local_shutdown_available;}
   catch{/* Keep the active player's error reporting independent of status polling. */}
 }
 function logout(){resetPlayer();token='';$('login').hidden=false;$('dashboard').hidden=true;$('logout').hidden=true;$('token').value='';}
@@ -58,7 +60,8 @@ $('start').addEventListener('click',()=>{
     if(socket!==ws || generation!==requestGeneration)return;
     if(typeof event.data==='string'){
       const data=JSON.parse(event.data);
-      if(data.type==='init'){mime=data.mime;prepare();}
+      if(data.type==='state'){viewerId=data.viewer_id;}
+      else if(data.type==='init'){mime=data.mime;prepare();ptzButtons().forEach(b=>b.disabled=false);}
       else if(data.type==='error' || data.type==='ended')fail(errors[data.error] || '直播连接已结束，可重新开始观看。');
     }else{if(chunks.length>=8){fail('网络或浏览器播放过慢，请重新连接。');return;}chunks.push(event.data);pump();}
   };
@@ -85,22 +88,12 @@ $('fullscreen').addEventListener('click',()=>{$('video').requestFullscreen?.().c
 window.addEventListener('pagehide',()=>resetPlayer());
 setInterval(()=>{poll();const v=$('video');if(playing&&v.buffered.length)$('buffer').textContent=v.readyState>=3?'正常播放':'正在等待画面';},3000);
 
-$('refresh-battery').addEventListener('click',async()=>{
-  $('refresh-battery').disabled=true;
-  try{
-    const response=await fetch('/api/jobs/battery',{method:'POST',headers:{Authorization:'Bearer '+token}});
-    if(response.status===409){status('正在观看或处理其他任务，请停止观看后再读取电量。');return;}
-    if(!response.ok){status('暂时无法读取电量，请稍后重试。');return;}
-    const job=await response.json();status('正在读取电量…');
-    for(let i=0;i<90;i++){
-      await new Promise(resolve=>setTimeout(resolve,1000));
-      if(!token||serviceStopped)return;
-      const result=await fetch('/api/jobs/'+job.id,{headers:{Authorization:'Bearer '+token}});
-      if(!result.ok)throw new Error('job');const value=await result.json();
-      if(value.state==='complete'){await poll();status('电量已读取；15 分钟内重复读取会使用最近结果。');return;}
-      if(value.state==='failed'){status('电量读取失败，保留上次结果。');return;}
-    }
-    status('读取仍在进行，可稍后查看电量更新时间。');
-  }catch{status('无法连接服务，电量保留上次结果。');}
-  finally{$('refresh-battery').disabled=false;}
-});
+
+async function sendMove(direction){
+  if(!viewerId||!token)return;
+  try{const response=await fetch('/api/live/ptz',{method:'POST',keepalive:true,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({viewer_id:viewerId,direction})});if(!response.ok&&direction!=='stop')status('暂时无法调整方向，请确认正在观看，或稍后重试。');}
+  catch{if(direction!=='stop')status('控制连接中断，后端将尝试停止转动。');}
+}
+ptzButtons().forEach(button=>button.addEventListener('click',()=>sendMove(button.dataset.direction)));
+window.addEventListener('blur',()=>sendMove('stop'));
+document.addEventListener('visibilitychange',()=>{if(document.hidden)sendMove('stop');});

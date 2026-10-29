@@ -22,6 +22,7 @@
 - Use a light interface as the default; the user dislikes the dark theme.
 - Explain progress through functions and observable results. Minimize audio/video jargon;
   explain a necessary term briefly instead of assuming specialist knowledge.
-- Battery level and charging status are requested future features. Avoid frequent new
-  camera connections just to refresh battery readings on this solar/battery device.
+- Battery display uses a battery icon plus percentage. While watching, query every
+  five minutes on the existing session; stop querying when no viewers remain.
+  Avoid extra camera connections solely to refresh a battery reading.
 - Clearly distinguish stopping viewing, logging out, and shutting down the local backend.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import queue
+import secrets
 import select
 import struct
 import subprocess
@@ -15,6 +16,7 @@ from pathlib import Path
 from . import protocol as wire
 from .client import CameraClient
 from .config import Settings
+from .controls import CameraControls
 from .errors import CameraError
 from .media import find_tool
 
@@ -22,7 +24,7 @@ MAX_BOX = 2 * 1024**2
 MAX_VIEWERS = 3
 
 
-def camera_frames(config: Path, stop: threading.Event):
+def camera_frames(config: Path, stop: threading.Event, controls=None):
     settings = Settings.load(config)
     client = CameraClient(settings)
     client.bridge.timeout = min(client.bridge.timeout, 10)
@@ -33,6 +35,8 @@ def camera_frames(config: Path, stop: threading.Event):
             camera.send(
                 wire.LIVE_START, wire.live_payload(2, 0 if settings.shared else settings.user_id)
             )
+            if controls:
+                controls.attach(camera)
             while not stop.is_set():
                 deadline = time.monotonic() + 5
                 header = wire.parse_live_header(
@@ -63,6 +67,8 @@ def camera_frames(config: Path, stop: threading.Event):
                     keep = time.monotonic()
                 yield data
         finally:
+            if controls:
+                controls.close()
             try:
                 camera.send(wire.LIVE_STOP, bytes(4))
             except (CameraError, OSError):
@@ -185,6 +191,7 @@ class FragmentReader:
 
 @dataclass(eq=False)
 class Subscriber:
+    identity: str = field(default_factory=lambda: secrets.token_hex(16))
     messages: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=4))
     closed: threading.Event = field(default_factory=threading.Event)
 
@@ -204,6 +211,7 @@ class StreamManager:
         self.frames = self.fragments = 0
         self.encoder_pid = None
         self.shutdown_requested = False
+        self.controls = CameraControls()
 
     def snapshot(self):
         with self.guard:
@@ -215,6 +223,8 @@ class StreamManager:
                 "fragments": self.fragments,
                 "audio": False,
                 "session_limit_seconds": 1800,
+                    "control_error": self.controls.error,
+                    "ptz_active": bool(self.controls.sent),
             }
 
     def subscribe(self):
@@ -244,10 +254,17 @@ class StreamManager:
 
     def unsubscribe(self, viewer):
         with self.guard:
+            self.controls.release(viewer.identity)
             self.viewers.discard(viewer)
             viewer.closed.set()
             if not self.viewers:
                 self.stop.set()
+
+    def move(self, identity, direction):
+        with self.guard:
+            if not any(v.identity == identity and not v.closed.is_set() for v in self.viewers):
+                raise CameraError("viewer_missing", "Start watching before moving the camera.")
+            self.controls.request_move(identity, direction)
 
     def publish(self, event, value):
         with self.guard:
@@ -299,7 +316,11 @@ class StreamManager:
         process = output = source = None
         started = time.monotonic()
         try:
-            source = self.source_factory(self.config, self.stop)
+            source = (
+                camera_frames(self.config, self.stop, self.controls)
+                if self.source_factory is camera_frames
+                else self.source_factory(self.config, self.stop)
+            )
             for data in source:
                 if self.stop.is_set():
                     break

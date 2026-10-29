@@ -3,6 +3,7 @@
 import hashlib
 import struct
 import time
+import uuid
 from pathlib import Path
 
 from .client import CameraClient
@@ -10,6 +11,7 @@ from .config import Settings, read_private_json, write_private_json
 from .errors import CameraError
 
 TTL = 15 * 60
+WATCH_INTERVAL = 300
 
 
 def parse(payload):
@@ -46,9 +48,16 @@ def refresh(config: Path):
     with CameraClient(settings) as camera:
         camera.send(912, bytes(4))
         value = parse(camera.response(913, time.monotonic() + settings.request_timeout))
-    value["updated_at"] = time.time()
+    return save(settings, value)
+
+
+def save(settings, value):
+    value = {**value, "updated_at": time.time()}
     path = cache_path(settings)
-    temporary = path.with_suffix(".new")
-    write_private_json(temporary, value)
-    temporary.replace(path)
+    temporary = path.with_suffix("." + uuid.uuid4().hex + ".new")
+    try:
+        write_private_json(temporary, value)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return {**value, "stale": False, "from_cache": False}

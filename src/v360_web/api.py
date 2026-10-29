@@ -35,6 +35,11 @@ class LiveRequest(BaseModel):
     resolution: int = Field(default=2, ge=0, le=3)
 
 
+class MoveRequest(BaseModel):
+    viewer_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    direction: str
+
+
 def create_app(
     root: Path, access_token: str, config_path: Path | None = None, *, shutdown_callback=None
 ):
@@ -178,7 +183,9 @@ def create_app(
                 await socket.close(code=1008, reason="Authentication required")
                 return
             viewer = streams.subscribe()
-            await socket.send_json({"type": "state", "state": "starting"})
+            await socket.send_json(
+                {"type": "state", "state": "starting", "viewer_id": viewer.identity}
+            )
 
             async def send_frames():
                 while not viewer.closed.is_set():
@@ -260,6 +267,17 @@ def create_app(
     @app.post("/api/jobs/battery", status_code=202, dependencies=[Depends(authorize)])
     def battery_job():
         return submit(battery.refresh)
+
+    @app.post("/api/live/ptz", dependencies=[Depends(authorize)])
+    def move(body: MoveRequest):
+        mapping = {"stop": 0, "up": 1, "down": 2, "left": 3, "right": 6}
+        if body.direction not in mapping:
+            raise HTTPException(422, "Unknown direction")
+        try:
+            streams.move(body.viewer_id, mapping[body.direction])
+        except CameraError as error:
+            raise HTTPException(409, error.code) from error
+        return {"accepted": True}
 
     @app.get("/api/live/captures/{key}/file", dependencies=[Depends(authorize)])
     def live_file(key: str):
