@@ -77,16 +77,18 @@ def create_app(root: Path, access_token: str, config_path: Path | None = None):
     @app.get("/api/status", dependencies=[Depends(authorize)])
     def status():
         configured = False
+        transport = "not_configured"
         if config_path:
             try:
-                Settings.load(config_path)
+                settings = Settings.load(config_path)
                 configured = True
+                transport = settings.bridge_kind
             except CameraError:
                 pass
         return {
             "camera_configured": configured,
             "camera_connection_state": "not_polled",
-            "transport": "android_usb_bridge",
+            "transport": transport,
             "hardware_acceptance": "not_recorded",
             "background_jobs": "memory_only; not resumed after restart",
         }

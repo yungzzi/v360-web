@@ -26,6 +26,9 @@ def main():
         action="store_true",
         help="Connect and close the configured camera; no device login",
     )
+    parser.add_argument(
+        "--build-worker", action="store_true", help="Build private stdio SDK worker"
+    )
     args = parser.parse_args()
     do_initialize = args.initialize or args.connect
     runtime = ROOT / ".private/android-runtime-arm64"
@@ -49,13 +52,34 @@ def main():
     env["LD_LIBRARY_PATH"] = ":".join(
         str(sysroot / p) for p in ("usr/lib/x86_64-linux-gnu", "lib/x86_64-linux-gnu")
     )
-    mode = "connect" if args.connect else "initialize" if args.initialize else "version"
+    mode = (
+        "native-worker"
+        if args.build_worker
+        else "connect"
+        if args.connect
+        else "initialize"
+        if args.initialize
+        else "version"
+    )
     obj, exe = build / (mode + ".o"), build / (mode + "-probe")
     extra = ["--defsym", "INITIALIZE=1"] if do_initialize else []
     if args.connect:
         extra += ["--defsym", "CONNECT=1"]
     subprocess.run(
-        [str(assembler), *extra, "-o", str(obj), str(ROOT / "tools/ppcs_version_arm64.S")],
+        [
+            str(assembler),
+            *extra,
+            "-o",
+            str(obj),
+            str(
+                ROOT
+                / (
+                    "tools/native_ppcs_worker.S"
+                    if args.build_worker
+                    else "tools/ppcs_version_arm64.S"
+                )
+            ),
+        ],
         env=env,
         check=True,
         timeout=20,
@@ -91,6 +115,9 @@ def main():
         timeout=20,
     )
     payload = b""
+    if args.build_worker:
+        print(json.dumps({"worker_built": str(exe.relative_to(ROOT))}))
+        return 0
     if do_initialize:
         from v360_web.config import read_private_json
 

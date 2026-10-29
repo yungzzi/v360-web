@@ -8,7 +8,7 @@ Linux SDK 路线：本次访问 CS2 官网超时，尚未取得并验证与 V360
 
 Android 兼容路线：当前 WSL 为 x86_64，用户没有 `/dev/kvm` 读写权限。使用项目局部 QEMU user-mode 执行 ARM64 ELF，并复用私有 Android Bionic 加载器及依赖库，无需启动完整 Android 系统或使用 KVM。原 PPCS 库保持不变，通过其导出的 C API 调用，不经过 JNI、ADB 或手机桥接端口。
 
-这属于 Android 用户态库兼容运行，不是已经取得原生 glibc Linux SDK。QEMU 和交叉 binutils 来自 Ubuntu 包，下载后与本机 APT 索引 SHA-256 核对；包记录在 `.tools/phone-free/packages.json`。加载器及七个运行文件最初从已授权手机只读取得，保存在 `.private/android-runtime-arm64/`，来源及 hash 存在其 `provenance.json`。后续探针运行只使用这些本地文件，不访问手机；未变更手机设置或复制 App 私有数据。
+这属于 Android 用户态库兼容运行，不是已经取得原生 glibc Linux SDK。QEMU 和交叉 binutils 来自 Ubuntu 包，下载后与本机 APT 索引 SHA-256 核对；包记录在 `.tools/phone-free/packages.json`。包括加载器在内的七个运行文件最初从已授权手机只读取得，保存在 `.private/android-runtime-arm64/`，来源及 hash 存在其 `provenance.json`。后续探针运行只使用这些本地文件，不访问手机；未变更手机设置或复制 App 私有数据。
 
 ## 已实际运行
 
@@ -31,6 +31,6 @@ cd /home/yungzzi/workspace/04_tools-and-scripts/v360-web
 
 编写隔离的原生工作进程与 Python 适配器，接入初始化、连接、读写、关闭及超时回收。先通过正常设备认证，再列目录和下载一个片段，独立解码，与已有手机桥基线对照。验证期间关闭手机助手通道以排除回退依赖。
 
-正式后端当前仍配置为 Windows USB 适配器。新路径未接入上述读写流程前，保留手机用于现有后端及对照。最终还需在阿里云目标环境验证网络、资源占用、休眠唤醒和重启恢复；当前结果不是云服务器验收。
+后续已完成读写适配器及真实 SD 片段闭环，正式本机配置已切换为 `native-arm64`，详见 [无手机后端说明](native-backend.md)。此前 USB 配置仅私有保留用于对照。阿里云网络、资源占用、休眠唤醒和重启恢复仍待在目标环境验收。
 
 录像目标按用户确认收敛为设备实际产生的观看期间和动作触发片段，不要求全天连续录像。
