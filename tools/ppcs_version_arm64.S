@@ -72,12 +72,12 @@ initialized:
     mov x8, #64
     svc #0
     mov x0, #0
-    mov x8, #93
+    mov x8, #94 // exit_group: terminate the owned process and SDK threads
     svc #0
 .ifdef INITIALIZE
 input_error:
     mov x0, #2
-    mov x8, #93
+    mov x8, #94 // exit_group: terminate the owned process and SDK threads
     svc #0
 .endif
 .size _start, .-_start

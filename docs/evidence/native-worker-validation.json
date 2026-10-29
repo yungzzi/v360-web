@@ -1,0 +1,54 @@
+{
+  "date": "2026-10-29",
+  "scope": "Local WSL x86_64 only; QEMU user-mode and Bionic, no full Android OS",
+  "phone_helper_stopped": true,
+  "usb_forward_disabled": true,
+  "requires_phone_bridge_token": false,
+  "requires_windows_python": false,
+  "default_adapter": "native-arm64",
+  "device_authentication": "accepted",
+  "directory": {
+    "records": 101,
+    "camera_validation": "list_received_with_invalid_records",
+    "invalid_records": 1,
+    "metadata_complete": false,
+    "raw_pages_saved": 1
+  },
+  "download": {
+    "state": "verified",
+    "bytes": 1452034,
+    "formats": "mov,mp4,m4a,3gp,3g2,mj2"
+  },
+  "preview": {
+    "bytes": 2922052,
+    "duration_seconds": "15.060000",
+    "codecs": [
+      "h264",
+      "aac"
+    ]
+  },
+  "api": {
+    "unauthenticated_status": 401,
+    "authenticated_status": 200,
+    "sha_matches": true,
+    "selected_transport": "native-arm64",
+    "environment": "in-process FastAPI; not cloud deployment"
+  },
+  "observed_native_cleanup": {
+    "force_close_ret": 0,
+    "deinitialize_ret": 0
+  },
+  "worker_stopped_after_check": true,
+  "software_checks": {
+    "pytest_passed": 47,
+    "ruff": "passed",
+    "warning": "Starlette/httpx deprecation"
+  },
+  "limitations": [
+    "Original V360 App background state was not isolated; independent cold-sleep wake unverified",
+    "Aliyun server runtime and network not tested",
+    "No long-duration stability or resource budget acceptance",
+    "One malformed directory record retained; metadata completeness not claimed",
+    "Live viewing, PTZ and complete web frontend still pending"
+  ]
+}
