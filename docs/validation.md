@@ -19,9 +19,17 @@ Python 当前共 21 项检查通过，最终记录见 `docs/evidence/software-va
 
 2026-10-29，已授权手机 RMX3700 安装助手，USB 配对与 WSL `bridge-check` 成功，SDK API 版本返回 `84017664`。原 App 报告版本 7.2.0（706）。
 
-已从原 App 设置页取得目标设备 DID 并仅保存到本地私有配置。原包 `DeviceUtil.getConnectMode` 的 LTE 分支返回 94；用该模式和对应 BFEP SDK 服务器参数，真实 PPCS 连接一次成功，约 2.97 秒，随后关闭返回 0，再次检查会话数为 0。SDK 初始化返回 0。此步骤未发送设备登录、视频或设备设置命令。
+已从原 App 设置页取得目标设备 DID 并仅保存到本地私有配置。原包 `DeviceUtil.getConnectMode` 的 LTE 分支返回 94；用该模式和对应 BFEP SDK 服务器参数，真实 PPCS 连接一次成功，连接与关闭合计约 2.97 秒。助手关闭 RPC 返回 0，再次检查会话数为 0；此版未单独记录原生 ForceClose 的返回码。SDK 初始化返回 0。此步骤未发送设备登录、视频或设备设置命令。
 
 原 App 在测试前访问过设备设置，因此本次不能确认深睡后的独立唤醒。一次连接也不能证明持续稳定性。脱敏记录见 `docs/evidence/android-device-validation.json`；DID、账号、密码、令牌及截图均不进入 Git。
+
+## 正常账号参数导入的软件检查
+
+分支 `feat/cloud-device-onboarding` 增加 `cloud-login`，通过原包 HTTPS 登录和设备列表接口，仅导入与已保存 DID 唯一匹配的设备参数。账号密码不持久化；手机桥令牌及当前连接模式保留。
+
+原包 `AesUtil` 调用 native `AesC`；ARM64 `libopenssl.so` 的导出函数、OpenSSL 导入和反汇编确认 AES-128-ECB 与默认 EVP 填充流程，JNI 直接使用传入的 UTF-8 key。四组加密结果与另行执行的 JDK 17 Cipher(AES/ECB/PKCS5Padding) 向量一致，包含中文、整块和较长输入。
+
+32 项 Python 检查通过；其中新增 11 项覆盖账号请求和目标设备导入、重定向拒绝、失败保留原配置，以及输出和私有文件的敏感值检查。此结果使用测试账号数据，不代表厂商接受了真实账号登录。真实账号登录、设备认证及 SD 下载仍待完成。
 
 ## 尚未执行
 

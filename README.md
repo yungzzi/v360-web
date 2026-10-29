@@ -15,13 +15,15 @@
 - Android USB 助手：本机回环监听、一次性六位码配对、每条 RPC 的令牌认证、连接归属与断线释放。
 - WSL 通过 Windows Python 私有管道访问 Windows 的 ADB USB 转发；不依赖 WSL 直通 USB，也不配置公开桥接端口。
 
-**已完成真实手机配对、SDK 初始化，并建立及关闭过一次摄像头 PPCS 底层会话。设备登录、SD 列表及下载仍待验证，深睡唤醒和全天运行尚未确认。** 验证依据见 [开发验证记录](docs/validation.md)。
+**已完成真实手机配对、SDK 初始化、正常账号参数导入及摄像头登录认证。SD 目录已有响应，实际数据布局正在核对；下载、深睡唤醒和全天运行尚未确认。** 验证依据见 [开发验证记录](docs/validation.md)。
 
 ## Git 规则
 
 用户要求：开发使用新功能分支，普通提交不得直接落在 `main`，功能完成后才合并，所有合并显式使用 `--no-ff`。
 
 当前功能分支：`feat/ppcs-recording-bootstrap`。真实设备闭环未完成，因此暂不合并。
+
+账号参数导入在 `feat/cloud-device-onboarding` 开发，已完成真实账号设备参数导入与后续摄像头认证检查。
 
 ```bash
 python3 tools/setup_git.py
@@ -50,6 +52,8 @@ uv run --extra dev pytest -q
 ## 下一步：只验证手机助手
 
 按 [手机接入说明](docs/phone-setup.md) 安装助手、通过 USB 连接你身边的 Android 设备，先执行 `pair-bridge` 与 `bridge-check`。这一阶段不需要摄像头密码，不会主动连接家中的摄像头。
+
+用户不知道单独设备密码时，可按 [账号导入说明](docs/account-onboarding.md) 在本地运行 `uv run v360 cloud-login`，通过正常账号登录取得目标设备参数。已有有效会话时可运行 `uv run v360 cloud-import`，排查字段处理时可用 `--cached` 复用私有列表。
 
 后续填好正常设备凭据，再验证一个 SD 片段：
 

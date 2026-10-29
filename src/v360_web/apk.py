@@ -184,3 +184,28 @@ def import_apk(apk: Path, private: Path):
             {"apk_sha256": KNOWN_APK, "libraries": libraries, "target_executed": False},
         )
     return {"apk_sha256": KNOWN_APK, "profile_count": len(profiles), "facts": facts}
+
+
+def import_cloud_profile(apk: Path, private: Path):
+    """Import the shipped account cipher key separately; never overwrite SDK credentials."""
+    digest = hashlib.sha256()
+    with apk.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != KNOWN_APK:
+        raise CameraError("unsupported_apk", "Use the analyzed V360 Pro 7.2.0 APK.")
+    with zipfile.ZipFile(apk) as archive:
+        dex = DexFile(archive.read("classes10.dex"))
+        key = dex.static_values("Lcom/qianniao/base/utils/AesUtil;").get("WEB_KEY")
+    if not isinstance(key, str) or len(key.encode("ascii")) != 16:
+        raise CameraError("apk_layout", "Account cipher profile layout is not recognized.")
+    target = private / "cloud-profile.json"
+    value = {"source_apk_sha256": KNOWN_APK, "web_key": key}
+    if target.exists():
+        from .config import read_private_json
+
+        if read_private_json(target) != value:
+            raise CameraError("cloud_profile", "An existing account profile differs; stopped.")
+    else:
+        write_private_json(target, value)
+    return {"cloud_profile_imported": True, "apk_sha256": KNOWN_APK}

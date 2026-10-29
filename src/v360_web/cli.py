@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__, service
-from .apk import import_apk
+from .apk import import_apk, import_cloud_profile
 from .bridge import create_bridge
 from .config import Settings, initialize_config, read_private_json, write_private_json
 from .errors import CameraError
@@ -35,6 +35,11 @@ def main():
     commands.add_parser("pair-bridge")
     commands.add_parser("bridge-check")
     commands.add_parser("connect-check")
+    commands.add_parser("cloud-login")
+    cloud_resume = commands.add_parser("cloud-import")
+    cloud_resume.add_argument("--cached", action="store_true")
+    cloud_import = commands.add_parser("import-cloud-apk")
+    cloud_import.add_argument("apk", type=Path)
     imported = commands.add_parser("import-apk")
     imported.add_argument("apk", type=Path)
     listing = commands.add_parser("list")
@@ -69,6 +74,25 @@ def main():
             output({"created": [str(args.config.parent / n) for n in ["device.json", "web.json"]]})
         elif args.command == "import-apk":
             output(import_apk(args.apk, args.config.parent))
+        elif args.command == "import-cloud-apk":
+            output(import_cloud_profile(args.apk, args.config.parent))
+        elif args.command == "cloud-import":
+            from .cloud import resume_import
+
+            resume_import(args.config, cached=args.cached)
+            output({"device_credentials_imported": True, "camera_connection": "not_attempted"})
+        elif args.command == "cloud-login":
+            from .cloud import onboard
+
+            account = input("V360 Pro account (phone/email; not stored): ").strip()
+            password = getpass.getpass("V360 Pro account password (not stored): ")
+            onboard(
+                args.config,
+                account,
+                password,
+                progress=lambda s: print(s, file=sys.stderr, flush=True),
+            )
+            output({"device_credentials_imported": True, "camera_connection": "not_attempted"})
         elif args.command in ("configure", "configure-bridge"):
             cfg = read_private_json(args.config)
             if args.command == "configure":
@@ -153,6 +177,9 @@ def main():
             token = read_private_json(args.config.parent / "web.json")["access_token"]
             app = create_app(root, token, args.config)
             uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False)
+    except (EOFError, KeyboardInterrupt):
+        output({"error": "cancelled", "message": "Local operation cancelled."})
+        return 130
     except CameraError as error:
         output(error.as_dict())
         return 2
