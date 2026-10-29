@@ -5,21 +5,32 @@ import json
 import queue
 import secrets
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from . import __version__, battery, live, service
+from . import __version__, battery, live, playback, progress, service, storage
 from .config import Settings
 from .errors import CameraError
+from .jobs import JobStore
 from .store import RecordingStore
 from .streaming import StreamManager
 
@@ -49,7 +60,9 @@ def create_app(
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v360-camera")
     lock = threading.Lock()
     streams = StreamManager(config_path, lock)
-    jobs = {}
+    jobs = JobStore(root)
+    jobs.recover_interrupted()
+    media_sessions = {}
     bearer = HTTPBearer(auto_error=False)
 
     def local_controls(request: Request):
@@ -98,23 +111,66 @@ def create_app(
                 401, "Authentication required", headers={"WWW-Authenticate": "Bearer"}
             )
 
+    def authorize_media(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ):
+        if credentials is not None:
+            return authorize(credentials)
+        session = request.cookies.get("v360_media", "")
+        if request.headers.get('sec-fetch-site') in ('cross-site', 'same-site'):
+            raise HTTPException(403, 'Same-origin playback required')
+        if media_sessions.get(session, 0) <= time.monotonic():
+            raise HTTPException(401, "Authentication required")
+
+    @app.post("/api/playback/session", dependencies=[Depends(authorize)])
+    def playback_session(request: Request, response: Response):
+        now = time.monotonic()
+        for key in list(media_sessions):
+            if media_sessions[key] <= now:
+                del media_sessions[key]
+        old = request.cookies.get("v360_media", "")
+        media_sessions.pop(old, None)
+        if len(media_sessions) >= 32:
+            raise HTTPException(429, "Too many playback sessions")
+        key = secrets.token_urlsafe(32)
+        media_sessions[key] = now + 3600
+        response.set_cookie(
+            "v360_media",
+            key,
+            max_age=3600,
+            httponly=True,
+            samesite="strict",
+            secure=request.url.scheme == "https",
+            path="/api/",
+        )
+        return {"ready": True}
+
+    @app.delete("/api/playback/session", dependencies=[Depends(authorize)])
+    def end_playback_session(request: Request, response: Response):
+        media_sessions.pop(request.cookies.get("v360_media", ""), None)
+        response.delete_cookie("v360_media", path="/api/")
+        return {"closed": True}
+
     def submit(function, *args):
         if config_path is None:
             raise HTTPException(503, "Camera profile has not been configured")
         if not lock.acquire(blocking=False):
             raise HTTPException(409, "A camera operation is already running")
         job_id = secrets.token_hex(16)
-        jobs[job_id] = {"id": job_id, "state": "queued"}
+        jobs.update_job(job_id, state="queued", kind=function.__name__)
 
         def run():
-            jobs[job_id]["state"] = "running"
+            jobs.update_job(job_id, state="running")
+            hook = progress.callback.set(lambda value: jobs.update_job(job_id, progress=value))
             try:
-                jobs[job_id].update(state="complete", result=function(config_path, *args))
+                jobs.update_job(job_id, state="complete", result=function(config_path, *args))
             except CameraError as error:
-                jobs[job_id].update(state="failed", **error.as_dict())
+                jobs.update_job(job_id, state="failed", **error.as_dict())
             except Exception:  # noqa: BLE001 -- fail the task without exposing unexpected credential data
-                jobs[job_id].update(state="failed", error="operation_failed")
+                jobs.update_job(job_id, state="failed", error="operation_failed")
             finally:
+                progress.callback.reset(hook)
                 lock.release()
 
         pool.submit(run)
@@ -142,7 +198,7 @@ def create_app(
             "camera_connection_state": "not_polled",
             "transport": transport,
             "hardware_acceptance": "not_recorded",
-            "background_jobs": "memory_only; not resumed after restart",
+            "background_jobs": "persisted; interrupted jobs require retry",
             "live": streams.snapshot(),
             "battery": battery_status,
             "local_shutdown_available": local_controls(request),
@@ -241,12 +297,52 @@ def create_app(
             {k: v for k, v in row.items() if k not in ["path", "device_id"]} for row in store.list()
         ]
 
-    @app.get("/api/recordings/{key}/file", dependencies=[Depends(authorize)])
+    @app.get("/api/library", dependencies=[Depends(authorize)])
+    def library(
+        day: date | None = None,
+        offset: int = Query(default=0, ge=0, le=1000000),
+        limit: int = Query(default=30, ge=1, le=100),
+    ):
+        did = None
+        if config_path:
+            try:
+                did = Settings.load(config_path).did
+            except CameraError as error:
+                raise HTTPException(503, "Camera profile unavailable") from error
+        total, items = store.library(day, offset, limit, did)
+        for row in items:
+            row.pop("device_id", None)
+            row.pop("path", None)
+            row["original_ready"] = store.media_path(row["id"]) is not None
+            row["playback_ready"] = playback.ready(root, row["id"]) is not None
+        return {
+            "items": items,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "storage": storage.summary(root),
+            "catalog": store.catalog(did, day),
+        }
+
+    @app.get("/api/recordings/{key}/file", dependencies=[Depends(authorize_media)])
     def recording_file(key: str):
         path = store.media_path(key)
         if path is None:
             raise HTTPException(404, "Verified recording not found")
-        return FileResponse(path, filename=f"{key}.media")
+        with path.open("rb") as file:
+            suffix = ".mp4" if file.read(12)[4:8] == b"ftyp" else ".media"
+        return FileResponse(path, filename=f"{key}{suffix}")
+
+    @app.get("/api/recordings/{key}/preview", dependencies=[Depends(authorize_media)])
+    def recording_preview(key: str):
+        path = playback.ready(root, key)
+        if path is None:
+            raise HTTPException(404, "Prepared recording not found")
+        return FileResponse(path, media_type="video/mp4")
+
+    @app.post("/api/jobs/playback/{key}", status_code=202, dependencies=[Depends(authorize)])
+    def prepare_playback(key: str):
+        return submit(playback.prepare, key)
 
     @app.post("/api/jobs/list", status_code=202, dependencies=[Depends(authorize)])
     def list_job(body: ListRequest):
@@ -288,8 +384,13 @@ def create_app(
 
     @app.get("/api/jobs/{key}", dependencies=[Depends(authorize)])
     def get_job(key: str):
-        if key not in jobs:
+        value = jobs.get_job(key)
+        if value is None:
             raise HTTPException(404, "Job not found")
-        return dict(jobs[key])
+        return value
+
+    @app.get("/api/jobs", dependencies=[Depends(authorize)])
+    def recent_jobs():
+        return jobs.recent()
 
     return app

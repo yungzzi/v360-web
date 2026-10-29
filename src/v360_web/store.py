@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -20,6 +21,9 @@ class RecordingStore:
                 state TEXT NOT NULL DEFAULT 'discovered', path TEXT,
                 bytes INTEGER NOT NULL DEFAULT 0, sha256 TEXT, error TEXT,
                 updated_at TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS catalog_checks (
+                device_id TEXT, start_local TEXT, end_local TEXT, checked_at TEXT,
+                diagnostics TEXT, PRIMARY KEY(device_id,start_local,end_local))""")
 
     @contextmanager
     def connection(self):
@@ -68,6 +72,50 @@ class RecordingStore:
                 dict(row)
                 for row in db.execute("SELECT * FROM recordings ORDER BY start_local DESC")
             ]
+
+    def library(self, day=None, offset=0, limit=30, did=None):
+        clauses, parameters = [], []
+        if day is not None:
+            clauses.append("substr(start_local,1,10)=?")
+            parameters.append(day.isoformat())
+        if did is not None:
+            clauses.append("device_id=?")
+            parameters.append(did)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.connection() as db:
+            total = db.execute("SELECT count(*) FROM recordings" + where, parameters).fetchone()[0]
+            rows = db.execute(
+                "SELECT * FROM recordings"
+                + where
+                + " ORDER BY start_local DESC,id LIMIT ? OFFSET ?",
+                [*parameters, limit, offset],
+            ).fetchall()
+        return total, [dict(row) for row in rows]
+
+    def save_catalog(self, did, start, end, diagnostics):
+        with self.connection() as db:
+            db.execute(
+                """INSERT OR REPLACE INTO catalog_checks VALUES (?,?,?,?,?)""",
+                (
+                    did,
+                    start.isoformat(),
+                    end.isoformat(),
+                    self.timestamp(),
+                    json.dumps(diagnostics),
+                ),
+            )
+
+    def catalog(self, did, day):
+        if not did or not day:
+            return None
+        with self.connection() as db:
+            row = db.execute(
+                """SELECT checked_at,diagnostics FROM catalog_checks
+                WHERE device_id=? AND start_local<=? AND end_local>=?
+                ORDER BY checked_at DESC LIMIT 1""",
+                (did, day.isoformat() + "T00:00:00", day.isoformat() + "T23:59:59"),
+            ).fetchone()
+        return {"checked_at": row[0], **json.loads(row[1])} if row else None
 
     def get(self, key: str):
         with self.connection() as db:

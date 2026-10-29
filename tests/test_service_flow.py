@@ -12,6 +12,17 @@ from v360_web.errors import CameraError
 from v360_web.store import RecordingStore
 
 
+@pytest.fixture(autouse=True)
+def simulated_storage_capacity(monkeypatch):
+    # /tmp is a 4 GiB tmpfs on this host. These are transport integration tests;
+    # exercise admission-limit failures separately in test_recording_library.py.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "v360_web.storage.shutil.disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3)
+    )
+
+
 def config(root, port):
     private = root / "private"
     write_private_json(private / "sdk-profiles.json", {"initialize": "test-only-sdk-profile"})
