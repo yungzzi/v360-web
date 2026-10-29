@@ -32,6 +32,8 @@ Windows 浏览器访问 `http://127.0.0.1:8080`。网页令牌在 `.private/web.
 
 本机 WSL 单观看者四秒采样：Python RSS 56.1 MiB、QEMU 19.4 MiB、FFmpeg 66.1 MiB，合计约 141.5 MiB（共享页可能重复计数），CPU 约单核 7.5%。这不是峰值、cgroup 内存统计或阿里云性能承诺。
 
-当前全部 71 项软件检查通过，覆盖真实 FFmpeg 分片及独立解码、共享流水线、断开清理、慢客户端、非法大分片、认证/Origin 拒绝、静态资源边界和转码器启动失败。wheel 构建通过。HTTP/WebSocket 也经本机 wsproto 实际运行，非仅进程内 TestClient。原始摄像头截图仅在本地交付目录，不入 Git。
+当前全部 72 项软件检查通过，覆盖真实 FFmpeg 分片及独立解码、共享流水线、断开清理、慢客户端、非法大分片、认证/Origin 拒绝、静态资源边界和转码器启动失败。wheel 构建通过。HTTP/WebSocket 也经本机 wsproto 实际运行，非仅进程内 TestClient。原始摄像头截图仅在本地交付目录，不入 Git。
 
 公网 HTTPS、反代 WebSocket、移动浏览器、长时间断线恢复、PTZ、独立深睡唤醒和阿里云仍待验收。结果摘要见 [脱敏验收](evidence/browser-live-validation.json)。实现参考 [FFmpeg 官方分片文档](https://ffmpeg.org/ffmpeg-formats.html) 和 [Starlette WebSocket 文档](https://starlette.dev/websockets/)。
+
+退出竞态修复：已经断开的 WebSocket 再次关闭不会作为应用错误；ASGI 取消时先同步解除观看者归属，再等待异步收尾，避免清理被取消后保留连接。新增回归后全套 72 项通过，两个退出用例连续重复五轮均通过；实际 wsproto 回放流连接退出后的 traceback 数为 0。
