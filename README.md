@@ -23,6 +23,8 @@
 
 当前功能分支：`feat/ppcs-recording-bootstrap`。真实设备闭环未完成，因此暂不合并。
 
+账号参数导入在 `feat/cloud-device-onboarding` 开发；真实账号验收通过前保留该分支。
+
 ```bash
 python3 tools/setup_git.py
 git switch -c feat/your-feature main
@@ -50,6 +52,8 @@ uv run --extra dev pytest -q
 ## 下一步：只验证手机助手
 
 按 [手机接入说明](docs/phone-setup.md) 安装助手、通过 USB 连接你身边的 Android 设备，先执行 `pair-bridge` 与 `bridge-check`。这一阶段不需要摄像头密码，不会主动连接家中的摄像头。
+
+用户不知道单独设备密码时，可按 [账号导入说明](docs/account-onboarding.md) 在本地运行 `uv run v360 cloud-login`，通过正常账号登录取得目标设备参数。账号导入已完成软件检查，真实账号登录仍待确认。
 
 后续填好正常设备凭据，再验证一个 SD 片段：
 
