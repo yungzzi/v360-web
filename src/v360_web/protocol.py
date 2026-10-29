@@ -10,6 +10,9 @@ MAGIC = 0x76768888
 LOGIN = 0x10
 LIST_REQUEST, LIST_RESPONSE = 0x318, 0x319
 DOWNLOAD_REQUEST, DOWNLOAD_RESPONSE = 33068, 33069
+LIVE_START, LIVE_STOP, KEEP_ALIVE = 1, 3, 914
+LIVE_FIRST, LIVE_VIDEO, LIVE_AUDIO = 428213528, 428216305, 428216306
+LIVE_TARGET, LIVE_END = 428213536, 553649432
 MAX_COMMAND = 1024 * 1024
 
 
@@ -121,3 +124,37 @@ def parse_download_header(header: bytes):
     if size < 0 or flags & ~3:
         raise CameraError("download_packet", "Download packet flags or length are unsupported.")
     return pkg_flag, flags, size, sequence, start_time
+
+
+def live_payload(resolution: int, user_id: int):
+    if resolution not in range(4) or not 0 <= user_id <= 0xFFFFFFFF:
+        raise CameraError("live_options", "Live resolution or user ID is out of range.")
+    # IOCTRL_LIVE.createBuffer(resolution, VIDEO=0, camera=0, null, user_id).
+    value = bytearray(struct.pack("<III8x", resolution, 0, 0))
+    struct.pack_into("<H", value, 18, user_id & 0xFFFF)
+    return bytes(value)
+
+
+@dataclass(frozen=True)
+class LiveHeader:
+    flag: int
+    size: int
+    pts_raw: int
+    frame_type: int
+    sequence: int
+    online: int
+    codec: int
+    subchannel: int
+
+
+def parse_live_header(data: bytes):
+    if len(data) != 32:
+        raise CameraError("live_header", "Live frame header must contain 32 bytes.")
+    flag, size, pts, kind, sequence, online, codec, _r0, sub, _r2, _r3 = struct.unpack(
+        "<7I4B", data
+    )
+    if flag not in (LIVE_FIRST, LIVE_TARGET, LIVE_VIDEO, LIVE_AUDIO, LIVE_END):
+        raise CameraError("live_header", "Unrecognized live frame flag.")
+    if not 0 < size < 10 * 1024**2 and not (flag == LIVE_END and size == 0):
+        raise CameraError("live_header", "Live frame length is out of range.")
+    return LiveHeader(flag, size, pts, kind, sequence, online, codec, sub)

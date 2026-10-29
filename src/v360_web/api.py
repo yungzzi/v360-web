@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from . import __version__, service
+from . import __version__, live, service
 from .config import Settings
 from .errors import CameraError
 from .store import RecordingStore
@@ -22,6 +22,11 @@ class ListRequest(BaseModel):
     channel: int = Field(ge=0, le=255)
     start: datetime
     end: datetime
+
+
+class LiveRequest(BaseModel):
+    seconds: float = Field(default=10, ge=1, le=60, allow_inf_nan=False)
+    resolution: int = Field(default=2, ge=0, le=3)
 
 
 def create_app(root: Path, access_token: str, config_path: Path | None = None):
@@ -117,6 +122,17 @@ def create_app(root: Path, access_token: str, config_path: Path | None = None):
     @app.post("/api/jobs/download/{key}", status_code=202, dependencies=[Depends(authorize)])
     def download_job(key: str):
         return submit(service.download, key)
+
+    @app.post("/api/jobs/live", status_code=202, dependencies=[Depends(authorize)])
+    def live_job(body: LiveRequest):
+        return submit(live.capture, body.seconds, body.resolution)
+
+    @app.get("/api/live/captures/{key}/file", dependencies=[Depends(authorize)])
+    def live_file(key: str):
+        path = live.preview_path(root, key)
+        if path is None:
+            raise HTTPException(404, "Verified live capture not found")
+        return FileResponse(path, media_type="video/mp4", filename=f"live-{key}.mp4")
 
     @app.get("/api/jobs/{key}", dependencies=[Depends(authorize)])
     def get_job(key: str):
