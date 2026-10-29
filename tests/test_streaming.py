@@ -5,7 +5,7 @@ import threading
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from v360_web.api import create_app
 from v360_web.errors import CameraError
@@ -185,3 +185,25 @@ def test_authenticated_socket_disconnect_stops_source(hevc, tmp_path):
             assert b"moof" in socket.receive_bytes()
         assert cleaned.wait(6)
     assert app.state.streams.encoder_pid is None
+
+
+def test_already_disconnected_socket_can_be_closed_during_final_cleanup(tmp_path, monkeypatch):
+    original = WebSocket.close
+    calls = []
+
+    async def close(self, *args, **kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            raise WebSocketDisconnect(1006)
+        await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(WebSocket, "close", close)
+    with (
+        TestClient(create_app(tmp_path, TOKEN)) as client,
+        client.websocket_connect("/api/live/ws") as socket,
+    ):
+        socket.send_json({"token": "wrong"})
+        with pytest.raises(WebSocketDisconnect) as error:
+            socket.receive_json()
+        assert error.value.code == 1008
+    assert len(calls) == 2

@@ -13,7 +13,7 @@
 - 普通 JDK 检查一次性配对窗口的到期、重放及尝试次数。
 - 临时 Git 仓库检查 main 普通提交被阻止，功能分支可提交，`--no-ff` 合并产生双父提交。
 
-初始 21 项检查记录见 `docs/evidence/software-validation.json`；当前新增账号导入、SD 兼容、原生进程适配、实时取流和网页持续直播检查后共 71 项通过。测试适配器目前有一个 Starlette/httpx 弃用提示，检查本身通过。
+初始 21 项检查记录见 `docs/evidence/software-validation.json`；当前新增账号导入、SD 兼容、原生进程适配、实时取流和网页持续直播检查后共 72 项通过。测试适配器目前有一个 Starlette/httpx 弃用提示，检查本身通过。
 
 ## 已执行的真实设备检查
 

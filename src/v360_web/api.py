@@ -182,16 +182,23 @@ def create_app(root: Path, access_token: str, config_path: Path | None = None):
             await socket.close(code=1008)
         except WebSocketDisconnect:
             pass
+        except asyncio.CancelledError:
+            pass
         finally:
+            # Release ownership synchronously, even if the ASGI task is cancelled
+            # again while awaiting child-task cleanup.
+            if viewer is not None:
+                streams.unsubscribe(viewer)
             for task in tasks:
                 task.cancel()
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            if viewer is not None:
-                streams.unsubscribe(viewer)
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                except asyncio.CancelledError:
+                    pass
             try:
                 await socket.close()
-            except RuntimeError:
+            except (RuntimeError, WebSocketDisconnect, OSError, asyncio.CancelledError):
                 pass
 
     @app.get("/api/recordings", dependencies=[Depends(authorize)])

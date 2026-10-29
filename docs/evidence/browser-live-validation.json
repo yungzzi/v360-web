@@ -42,9 +42,15 @@
   ],
   "storage_note": "Live stream is memory-only; recording quota and retention are not implemented here.",
   "software_checks": {
-    "pytest_passed": 71,
+    "pytest_passed": 72,
     "ruff": "passed",
     "wheel_build": "passed",
     "wheel_assets": "present"
+  },
+  "disconnect_regression": {
+    "repeated_runs": 5,
+    "test_executions": 10,
+    "passed": true,
+    "actual_wsproto_recorded_input_tracebacks": 0
   }
 }
