@@ -6,17 +6,19 @@
 
 1. 手机用 USB 数据线接到当前 Windows 电脑。
 2. 开启开发者选项中的 USB 调试；入口随手机品牌不同。电脑请求调试授权时，在手机上确认。
-3. 在 Windows PowerShell 中执行下面的脚本。每一步都是显式操作；脚本不会自动选择多台设备中的某一台。
+3. 在 Windows PowerShell 中执行下面的命令。WSL 的 `\\wsl.localhost\...` 路径可能被 `RemoteSigned` 视为远程来源，因此这里为每次启动的子进程指定执行策略；不会修改当前用户或整台电脑的执行策略。每一步都是显式操作；脚本不会自动选择多台设备中的某一台。
 
 ```powershell
 $project = '\\wsl.localhost\Ubuntu\home\yungzzi\workspace\04_tools-and-scripts\v360-web'
-& "$project\tools\phone.ps1" -Action devices
-& "$project\tools\phone.ps1" -Action install
-& "$project\tools\phone.ps1" -Action open
-& "$project\tools\phone.ps1" -Action forward
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps1" -Action devices
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps1" -Action install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps1" -Action open
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps1" -Action forward
 ```
 
 如有多台设备，用 `-Serial` 明确选择。安装的包名是 `org.v360web.bridge`，与 V360 Pro 不同；现有 App 数据不参与安装。
+
+如果安装时手机出现 USB 安装确认，解锁手机并确认安装本项目的助手。只有出现 `Success` 后才继续下一步；`unauthorized` 表示还需在手机上确认 USB 调试授权。
 
 转发目标只有手机回环端口 8766。脚本使用 `--no-rebind`，不会直接覆盖其他已占用的转发。
 
@@ -50,7 +52,7 @@ uv run v360 bridge-check
 手机点 **Stop and release connections**。电脑可以移除对应转发：
 
 ```powershell
-& "$project\tools\phone.ps1" -Action remove-forward
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps1" -Action remove-forward
 ```
 
 本阶段手机是开发接入工具。长期部署时是否保留 Android 桥、放在哪里，仍需根据实际连接结果和服务器运行条件决定。
