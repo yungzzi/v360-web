@@ -56,6 +56,9 @@ def main():
     inspect.add_argument("file", type=Path)
     serving = commands.add_parser("serve")
     serving.add_argument("--port", type=int, default=8080)
+    serving.add_argument(
+        "--no-local-controls", action="store_true", help="Disable the local browser shutdown button"
+    )
     args = parser.parse_args()
     try:
         if args.command == "doctor":
@@ -188,8 +191,22 @@ def main():
             cfg = read_private_json(args.config) if args.config.exists() else {}
             root = (args.config.parent / cfg.get("data_root", "../data")).resolve()
             token = read_private_json(args.config.parent / "web.json")["access_token"]
-            app = create_app(root, token, args.config)
-            uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False, ws_max_size=4096)
+
+            def shutdown():
+                server.should_exit = True
+
+            app = create_app(
+                root,
+                token,
+                args.config,
+                shutdown_callback=None if args.no_local_controls else shutdown,
+            )
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    app, host="127.0.0.1", port=args.port, access_log=False, ws_max_size=4096
+                )
+            )
+            server.run()
     except (EOFError, KeyboardInterrupt):
         output({"error": "cancelled", "message": "Local operation cancelled."})
         return 130

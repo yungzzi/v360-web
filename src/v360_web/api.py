@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import ipaddress
 import json
 import queue
 import secrets
@@ -10,10 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from . import __version__, live, service
 from .config import Settings
@@ -33,7 +35,9 @@ class LiveRequest(BaseModel):
     resolution: int = Field(default=2, ge=0, le=3)
 
 
-def create_app(root: Path, access_token: str, config_path: Path | None = None):
+def create_app(
+    root: Path, access_token: str, config_path: Path | None = None, *, shutdown_callback=None
+):
     if len(access_token) < 32:
         raise ValueError("Web access token must contain at least 32 characters")
     store = RecordingStore(root)
@@ -42,6 +46,12 @@ def create_app(root: Path, access_token: str, config_path: Path | None = None):
     streams = StreamManager(config_path, lock)
     jobs = {}
     bearer = HTTPBearer(auto_error=False)
+
+    def local_controls(request: Request):
+        try:
+            return bool(shutdown_callback) and ipaddress.ip_address(request.client.host).is_loopback
+        except (ValueError, AttributeError):
+            return False
 
     @asynccontextmanager
     async def lifespan(app):
@@ -110,7 +120,7 @@ def create_app(root: Path, access_token: str, config_path: Path | None = None):
         return {"service": "v360-web", "version": __version__}
 
     @app.get("/api/status", dependencies=[Depends(authorize)])
-    def status():
+    def status(request: Request):
         configured = False
         transport = "not_configured"
         if config_path:
@@ -127,7 +137,21 @@ def create_app(root: Path, access_token: str, config_path: Path | None = None):
             "hardware_acceptance": "not_recorded",
             "background_jobs": "memory_only; not resumed after restart",
             "live": streams.snapshot(),
+            "local_shutdown_available": local_controls(request),
         }
+
+    @app.post("/api/local/shutdown", dependencies=[Depends(authorize)])
+    def shutdown(request: Request):
+        if not local_controls(request):
+            raise HTTPException(403, "Local service shutdown is not available")
+        origin = request.headers.get("origin")
+        if origin and origin != str(request.base_url).rstrip("/"):
+            raise HTTPException(403, "Same-origin request required")
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            {"state": "shutting_down"}, background=BackgroundTask(shutdown_callback)
+        )
 
     @app.websocket("/api/live/ws")
     async def live_socket(socket: WebSocket):
