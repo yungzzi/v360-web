@@ -1,0 +1,14 @@
+.venv/
+.tools/
+.private/
+data/
+dist/
+build/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.env
+*.apk
+*.so
+*.keystore

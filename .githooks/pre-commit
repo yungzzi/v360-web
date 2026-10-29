@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+branch=$(git symbolic-ref --quiet --short HEAD || true)
+if [ "$branch" = main ] && [ ! -f "$(git rev-parse --git-path MERGE_HEAD)" ]; then
+    echo 'Direct commits on main are prohibited. Create a feature branch.' >&2
+    exit 1
+fi

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+test -f "$(git rev-parse --git-path MERGE_HEAD)" || {
+    echo 'Expected a non-fast-forward merge commit.' >&2
+    exit 1
+}
