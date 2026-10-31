@@ -34,6 +34,7 @@ from .backup import BackupManager
 from .config import Settings
 from .errors import CameraError
 from .jobs import JobStore
+from .sessions import COOKIE, REMEMBER_SECONDS, SessionStore
 from .store import RecordingStore
 from .streaming import StreamManager
 
@@ -60,6 +61,10 @@ class BackupRequest(BaseModel):
     interval_minutes: int = Field(default=60, ge=15, le=360)
 
 
+class LoginRequest(BaseModel):
+    remember: bool = False
+
+
 class PinRequest(BaseModel):
     pinned: bool
 
@@ -83,6 +88,7 @@ def create_app(
     backup = BackupManager(root, config_path, lock)
     streams = StreamManager(config_path, lock, before_subscribe=backup.request_yield)
     media_sessions = {}
+    sessions = SessionStore(root, access_token)
     bearer = HTTPBearer(auto_error=False)
 
     def local_controls(request: Request):
@@ -128,20 +134,73 @@ def create_app(
             raise HTTPException(404)
         return FileResponse(static / name)
 
-    def authorize(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
-        if credentials is None or not hmac.compare_digest(
-            credentials.credentials.encode(), access_token.encode()
-        ):
-            raise HTTPException(
-                401, "Authentication required", headers={"WWW-Authenticate": "Bearer"}
-            )
+    def valid_token(value):
+        return isinstance(value, str) and hmac.compare_digest(value.encode(), access_token.encode())
+
+    def same_origin(request):
+        if request.headers.get("sec-fetch-site") in ("cross-site", "same-site"):
+            raise HTTPException(403, "Same-origin request required")
+        origin = request.headers.get("origin")
+        if origin and origin != f"{request.url.scheme}://{request.headers.get('host')}":
+            raise HTTPException(403, "Same-origin request required")
+
+    def authorize(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ):
+        if credentials is not None:
+            if valid_token(credentials.credentials):
+                return
+        else:
+            same_origin(request)
+            if sessions.valid(request.cookies.get(COOKIE, "")):
+                return
+        raise HTTPException(401, "Authentication required", headers={"WWW-Authenticate": "Bearer"})
+
+    def cookie_path(request):
+        return request.scope.get("root_path", "").rstrip("/") + "/api/"
+
+    @app.post("/api/auth/login")
+    def login(
+        body: LoginRequest,
+        request: Request,
+        response: Response,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ):
+        same_origin(request)
+        if credentials is None or not valid_token(credentials.credentials):
+            raise HTTPException(401, "Authentication required")
+        key = sessions.issue(body.remember, request.cookies.get(COOKIE, ""))
+        if key is None:
+            raise HTTPException(429, "Too many signed-in devices")
+        response.set_cookie(
+            COOKIE,
+            key,
+            max_age=REMEMBER_SECONDS if body.remember else None,
+            httponly=True,
+            samesite="strict",
+            path=cookie_path(request),
+            secure=request.url.scheme == "https" or os.environ.get("V360_SECURE_COOKIES") == "1",
+        )
+        return {"authenticated": True, "remembered": body.remember}
+
+    @app.delete("/api/auth/session")
+    def logout_session(request: Request, response: Response):
+        same_origin(request)
+        sessions.revoke(request.cookies.get(COOKIE, ""))
+        media_sessions.pop(request.cookies.get("v360_media", ""), None)
+        for name in (COOKIE, "v360_media"):
+            response.delete_cookie(name, path=cookie_path(request))
+        return {"closed": True}
 
     def authorize_media(
         request: Request,
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     ):
         if credentials is not None:
-            return authorize(credentials)
+            return authorize(request, credentials)
+        if request.cookies.get(COOKIE):
+            return authorize(request, None)
         session = request.cookies.get("v360_media", "")
         if request.headers.get("sec-fetch-site") in ("cross-site", "same-site"):
             raise HTTPException(403, "Same-origin playback required")
@@ -150,6 +209,8 @@ def create_app(
 
     @app.post("/api/playback/session", dependencies=[Depends(authorize)])
     def playback_session(request: Request, response: Response):
+        if sessions.valid(request.cookies.get(COOKIE, "")):
+            return {"ready": True}
         now = time.monotonic()
         for key in list(media_sessions):
             if media_sessions[key] <= now:
@@ -285,9 +346,9 @@ def create_app(
             if len(raw) > 4096:
                 raise ValueError
             supplied = json.loads(raw).get("token", "")
-            if not isinstance(supplied, str) or not hmac.compare_digest(
-                supplied.encode(), access_token.encode()
-            ):
+            browser_session = socket.cookies.get(COOKIE, "")
+            cookie_auth = not valid_token(supplied)
+            if cookie_auth and (origin is None or not sessions.valid(browser_session)):
                 await socket.close(code=1008, reason="Authentication required")
                 return
             for attempt in range(175):
@@ -303,7 +364,13 @@ def create_app(
             )
 
             async def send_frames():
+                checked = 0
                 while not viewer.closed.is_set():
+                    if cookie_auth and time.monotonic() - checked >= 1:
+                        if not await asyncio.to_thread(sessions.valid, browser_session):
+                            await socket.close(code=1008, reason="Authentication required")
+                            return
+                        checked = time.monotonic()
                     try:
                         event, value = await asyncio.to_thread(viewer.messages.get, True, 0.5)
                     except queue.Empty:

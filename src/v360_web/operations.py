@@ -117,6 +117,11 @@ def restore(folder, data, config, backups):
         temporary.chmod(0o600)
         # A restored archive stays paused until an operator has reviewed it.
         with sqlite3.connect(temporary) as db:
+            # Restoring metadata must not resurrect a previously revoked browser login.
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_sessions'"
+            ).fetchone():
+                db.execute("DELETE FROM browser_sessions")
             row = db.execute("SELECT body FROM backup_state WHERE id='policy'").fetchone()
             if row:
                 policy = json.loads(row[0])
