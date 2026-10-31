@@ -167,14 +167,16 @@ def create_app(
             httponly=True,
             samesite="strict",
             secure=request.url.scheme == "https" or os.environ.get("V360_SECURE_COOKIES") == "1",
-            path="/api/",
+            path=request.scope.get("root_path", "").rstrip("/") + "/api/",
         )
         return {"ready": True}
 
     @app.delete("/api/playback/session", dependencies=[Depends(authorize)])
     def end_playback_session(request: Request, response: Response):
         media_sessions.pop(request.cookies.get("v360_media", ""), None)
-        response.delete_cookie("v360_media", path="/api/")
+        response.delete_cookie(
+            "v360_media", path=request.scope.get("root_path", "").rstrip("/") + "/api/"
+        )
         return {"closed": True}
 
     def submit(function, *args):

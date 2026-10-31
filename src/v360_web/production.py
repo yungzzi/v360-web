@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 import uvicorn
@@ -24,6 +25,9 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     try:
+        root_path = os.environ.get("V360_ROOT_PATH", "")
+        if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*", root_path):
+            raise CameraError("root_path", "Use a simple URL prefix without a trailing slash.")
         settings = Settings.load(args.config)
         token = read_private_json(args.config.parent / "web.json")["access_token"]
         if settings.bridge_kind != "native-arm64" or len(token) < 32:
@@ -64,6 +68,7 @@ def main():
             uvicorn.run(
                 app,
                 host="0.0.0.0",
+                root_path=root_path,
                 port=args.port,
                 workers=1,
                 access_log=False,

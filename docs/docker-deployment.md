@@ -95,3 +95,9 @@ docker run --rm --network none --read-only --user 1000:1000 \
 内核 cgroup 实测 `cpu.max=100000 100000`、`memory.max=805306368`、`memory.swap.max=0`、`pids.max=256`；该轮峰值内存约 149 MiB。版本替换前自动备份，替换后通过 revision/readiness 检查，SQLite 和原片继续保留。在线恢复被实例锁拒绝；停机后恢复成功，全部原片 hash 不变，自动保存保持暂停。Uvicorn 完成 shutdown，容器通过 SIGTERM 退出码 143 结束，未 OOM；不能将正常 SIGTERM=143 误报成强杀=137。
 
 实测只覆盖本地 Docker Desktop、一台真实摄像头和有界任务。未据此宣称阿里云联网、Docker Hub 登录/推拉、完整目录同步、独立深睡唤醒或长期资源峰值已通过。数据见 [脱敏验收记录](evidence/docker-deployment-validation.json)。
+
+## 复用现有 HTTPS 的子路径
+
+部署在现有网站的 `/v360/` 下时，将 `.env` 的 `V360_ROOT_PATH=/v360`，使用 `deploy/nginx-subpath.conf.example` 作为已有 HTTPS server 内的 include。Nginx 向应用转发时去掉前缀；Uvicorn 通过 root_path 提供公开路径信息。页面从脚本 URL 推导前缀，API、直播 WebSocket、回放、原片和 Cookie 都保持在 `/v360/` 内。原有根路径部署仍受支持。前缀只能由简单字母、数字、横线、下划线组成，不带结尾斜杠。
+
+本地实际 Nginx 代理与 Edge 验收通过：页面登录、历史文件 Cookie 回放（15.048 秒、readyState=4）、640×360 实时画面（readyState=4），短时观看后主动断开；114 项软件检查通过。服务器上的原有站点须先备份配置，检查没有冲突路由并通过 `nginx -t` 后再做平滑 reload。
