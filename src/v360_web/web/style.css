@@ -11,3 +11,31 @@ header{background:#ffffff}.player-card,.info-card,.login-card{box-shadow:0 8px 2
 .section-tabs{display:flex;gap:8px;margin-bottom:32px;border-bottom:1px solid var(--line);padding-bottom:12px}.section-tabs button{background:transparent;color:var(--muted);border-color:transparent}.section-tabs .selected{background:#e6f1e9;color:#215f43;font-weight:600}.library-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:20px;background:#fff;border:1px solid var(--line);border-radius:12px}.library-toolbar label{font-size:13px;color:var(--muted)}.library-toolbar input{width:170px;padding:10px}.library-layout{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items:start}.recording-list-card,.replay-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:22px}.recording-list-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}.recording-list-head h2,.replay-card h2{margin:0;font-size:18px}.recording-row{display:flex;gap:15px;align-items:center;padding:19px 0;border-bottom:1px solid var(--line);justify-content:space-between}.recording-row strong{font-size:15px;font-weight:600}.recording-row small{display:block;color:var(--muted);font-size:12px;margin-top:4px}.recording-actions{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:8px}.recording-actions button,.recording-actions a{padding:7px 11px;font-size:12px}.recording-actions a{color:var(--accent);text-decoration:none}.recording-state{font-size:12px;color:var(--muted)}.recording-state.ready{color:#247458}.recording-empty{padding:50px 15px;text-align:center;color:var(--muted)}.pagination{display:flex;justify-content:space-between;align-items:center;padding-top:20px;font-size:12px;color:var(--muted)}.replay-card video{width:100%;aspect-ratio:16/9;background:#eaf0ed;border-radius:8px;margin:18px 0;max-height:none}.replay-card h2{margin-top:10px}.storage-info{font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding-top:18px;white-space:pre-line}.job-panel{padding:18px 22px;margin-bottom:20px;background:#eaf5ee;border:1px solid #cae3d3;border-radius:10px;display:flex;gap:15px;align-items:center;font-size:13px}.job-panel progress{max-width:200px;accent-color:#247458}.job-panel span{color:var(--muted);font-size:12px}@media(max-width:1050px){.library-layout{grid-template-columns:1fr}.replay-card{max-width:640px}}@media(max-width:520px){.recording-row{align-items:flex-start;flex-direction:column;gap:10px}.recording-actions{justify-content:flex-start}.job-panel{align-items:flex-start;flex-direction:column;gap:8px}.library-toolbar{padding:16px}.library-toolbar input{width:100%}}
 
 .backup-card{background:#fff;border:1px solid #dce6e1;border-radius:18px;padding:22px;margin-bottom:22px}.backup-card h2{margin:4px 0 10px}.backup-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:16px 0}.backup-actions select{padding:10px;border:1px solid #cddbd5;border-radius:9px;background:#f7faf8;color:#243b32}.backup-card>p{font-size:13px;line-height:1.7}
+
+
+/* Responsive controls and content: preserve usable touch targets without hiding overflow. */
+main, .workspace>*, .library-layout>*, .title-row>*, .recording-row>div{min-width:0}
+button,select{min-height:44px;touch-action:manipulation}
+button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+input,select{font-size:16px}
+.login-card .remember-row{display:flex;align-items:center;gap:10px;margin:18px 0 0;font-size:14px;min-height:44px;cursor:pointer}
+.remember-row input{width:20px;height:20px;accent-color:var(--accent);padding:0;flex:none}
+.backup-card p,.notice,.recording-row strong,.storage-info{overflow-wrap:anywhere}
+.ptz-pad{grid-template-columns:repeat(3,48px);grid-template-rows:repeat(3,48px);gap:8px}
+.ptz-pad button{min-height:48px}
+@media(max-width:900px){.workspace>aside{grid-template-columns:repeat(2,minmax(0,1fr))}.ptz-card{margin-bottom:0}.note-card{grid-column:1/-1}}
+@media(max-width:600px){
+ header{padding:0 16px}.header-right{gap:10px}.private{display:none}
+ main{padding:24px 16px 40px}.title-row{align-items:flex-start;flex-direction:column;margin-bottom:20px;gap:16px}
+ .device-badges{justify-content:space-between;width:100%}.section-tabs{margin-bottom:24px}.section-tabs button{flex:1}
+ .player-top{padding:12px;font-size:11px}.player-controls{gap:10px;flex-wrap:wrap;padding:12px}.player-controls>div{flex:1;gap:8px}.player-controls button{white-space:nowrap}
+ .workspace>aside{grid-template-columns:1fr}.info-card,.ptz-card,.backup-card,.recording-list-card,.replay-card{padding:18px}
+ .backup-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.backup-actions label{grid-column:1/-1}.backup-actions select{min-width:0;grid-column:1/-1;width:100%}
+ .backup-actions button{padding:10px 8px}.library-toolbar{display:grid;grid-template-columns:1fr;gap:10px}.library-toolbar input{width:100%;min-width:0}
+ .recording-row{align-items:stretch;flex-direction:column;gap:12px}.recording-actions{justify-content:flex-start;gap:8px}.recording-state{flex-basis:100%}
+ .recording-actions button{font-size:13px}.recording-list-head{flex-wrap:wrap}.pagination{gap:8px}.pagination button{padding:8px 12px}
+ .login-card{padding:28px 20px}.login-card h1{font-size:30px}.screen h2{font-size:16px;margin-top:10px}.camera-icon{width:52px;height:52px;line-height:48px;font-size:28px}
+ #empty p{margin:8px 0 0}dialog{max-height:85dvh;overflow:auto}
+}
+@media(max-width:360px){.player-controls>div{flex-basis:100%}.player-controls>div button{flex:1}.player-controls>#fullscreen{width:100%}.backup-actions{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}

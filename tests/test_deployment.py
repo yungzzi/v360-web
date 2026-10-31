@@ -269,3 +269,15 @@ def test_backup_preserves_disk_floor(deployment, monkeypatch):
     with pytest.raises(CameraError):
         backup(data, config, snapshots)
     assert not list(snapshots.iterdir())
+
+
+def test_restore_does_not_resurrect_revoked_browser_sessions(deployment):
+    from v360_web.sessions import SessionStore
+
+    data, config, snapshots, _key = deployment
+    sessions = SessionStore(data, "test-browser-token-for-restore-1234567890")
+    key = sessions.issue(True)
+    folder = backup(data, config, snapshots)
+    sessions.revoke(key)
+    restore(folder, data, config, snapshots)
+    assert not sessions.valid(key)
