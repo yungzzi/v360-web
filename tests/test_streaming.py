@@ -10,7 +10,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from v360_web.api import create_app
 from v360_web.errors import CameraError
 from v360_web.media import find_tool, probe, validate_decode
-from v360_web.streaming import FragmentReader, StreamManager, Subscriber
+from v360_web.streaming import FragmentReader, LivePacket, StreamManager, Subscriber
 
 TOKEN = "test-only-browser-token-12345678901234567890"
 
@@ -207,3 +207,52 @@ def test_already_disconnected_socket_can_be_closed_during_final_cleanup(tmp_path
             socket.receive_json()
         assert error.value.code == 1008
     assert len(calls) == 2
+
+
+def test_audio_video_mux_shared_and_cleanup(hevc, tmp_path):
+    audio = subprocess.check_output(
+        [
+            find_tool("ffmpeg"),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=8000:duration=1",
+            "-f",
+            "alaw",
+            "pipe:1",
+        ],
+        timeout=10,
+    )
+
+    def source(config, stop):
+        yield LivePacket("config", b"alaw")
+        while not stop.is_set():
+            yield LivePacket("video", hevc)
+            yield LivePacket("audio", audio)
+            stop.wait(0.1)
+
+    lock = threading.Lock()
+    manager = StreamManager(tmp_path / "unused", lock, source)
+    try:
+        first = manager.subscribe()
+        mime, init = get(first, "init")
+        assert "mp4a.40.2" in mime
+        assert manager.snapshot()["audio"]
+        target = tmp_path / "audio-video.mp4"
+        target.write_bytes(init + get(first, "fragment") + get(first, "fragment"))
+        second = manager.subscribe()
+        assert get(second, "init")[0] == mime
+        manager.unsubscribe(first)
+        manager.unsubscribe(second)
+        manager.thread.join(6)
+        streams = probe(target)["streams"]
+        assert {s["codec_name"] for s in streams} == {"h264", "aac"}
+        assert next(s for s in streams if s["codec_type"] == "audio")["sample_rate"] == "16000"
+        assert abs(float(streams[0]["start_time"]) - float(streams[1]["start_time"])) < 0.2
+        validate_decode(target)
+        assert not manager.thread.is_alive() and not lock.locked()
+        assert manager.encoder_pid is None
+    finally:
+        manager.close()

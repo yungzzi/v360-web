@@ -377,7 +377,12 @@ def create_app(
                         continue
                     if event == "init":
                         mime, data = value
-                        await asyncio.wait_for(socket.send_json({"type": "init", "mime": mime}), 5)
+                        await asyncio.wait_for(
+                            socket.send_json(
+                                {"type": "init", "mime": mime, "audio": "mp4a.40.2" in mime}
+                            ),
+                            5,
+                        )
                         await asyncio.wait_for(socket.send_bytes(data), 5)
                     else:
                         await asyncio.wait_for(socket.send_bytes(value), 5)
