@@ -266,3 +266,115 @@ def test_scheduler_runs_without_browser_or_api_calls(tmp_path, monkeypatch):
         backup.close()
     assert not backup.thread.is_alive()
     assert not backup.running
+
+
+def test_server_backfills_one_day_and_persists_cursor(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    queries = []
+
+    def discover(config, channel, start, end):
+        queries.append((start, end))
+        return {"metadata_complete": False, "records": 0}
+
+    monkeypatch.setattr(service, "discover", discover)
+    backup.cycle()
+    assert len(queries) == 2
+    assert queries[1][0].hour == 0 and queries[1][1].hour == 23
+    assert not backup.snapshot()["backfill_complete"]
+    restarted = manager(tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "discover", discover)
+    restarted.cycle()
+    assert queries[3][0].date() == queries[1][0].date() - timedelta(days=1)
+
+
+def test_new_queue_precedes_history_and_summary_counts(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    for i in range(10):
+        record(tmp_path, i, state="discovered")
+    record(tmp_path, 15, state="failed")
+    record(tmp_path, 16, state="verified", size=99)
+    queries = []
+    monkeypatch.setattr(
+        service,
+        "discover",
+        lambda *a: queries.append(a) or {"metadata_complete": True, "records": 0},
+    )
+    monkeypatch.setattr(service, "download", lambda *a: None)
+    backup.cycle()
+    assert len(queries) == 1
+    assert backup.snapshot()["archive"] == {
+        "saved": 1,
+        "saved_bytes": 99,
+        "pending": 11,
+        "failed": 1,
+        "evicted": 0,
+    }
+
+
+def test_older_than_seven_days_is_downloaded(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    key, _ = record(tmp_path, 10 * 24 * 60, state="discovered")
+    calls = []
+    monkeypatch.setattr(service, "download", lambda config, key: calls.append(key))
+    backup.cycle()
+    assert calls == [key]
+
+
+def test_failed_history_query_preserves_cursor(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    calls = []
+
+    def discover(*args):
+        calls.append(args)
+        if len(calls) == 2:
+            raise CameraError("sdk_connect", "unavailable")
+        return {"metadata_complete": True, "records": 0}
+
+    monkeypatch.setattr(service, "discover", discover)
+    backup.cycle()
+    assert backup.db.read("backfill:test-device") is None
+    assert not backup.running
+
+
+def test_history_failure_does_not_block_known_downloads(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    key, _ = record(tmp_path, state="discovered")
+    calls = []
+    queries = []
+
+    def discover(*args):
+        queries.append(args)
+        if len(queries) == 2:
+            raise CameraError("sdk_connect", "unavailable")
+        return {"metadata_complete": True, "records": 0}
+
+    monkeypatch.setattr(service, "discover", discover)
+    monkeypatch.setattr(service, "download", lambda config, key: calls.append(key))
+    backup.cycle()
+    assert calls == [key]
+    assert backup.snapshot()["backfill_error"] == "sdk_connect"
+    assert backup.snapshot()["error"] is None
+
+
+def test_backlog_continues_early_without_increasing_daily_budget(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    for i in range(11):
+        record(tmp_path, i, state="discovered")
+
+    def save(config, key):
+        progress.report("downloading", bytes=0, total=100)
+        RecordingStore(tmp_path).update(key, "verified")
+
+    monkeypatch.setattr(service, "download", save)
+    backup.cycle()
+    state = backup.snapshot()
+    assert state["archive"]["pending"] == 1
+    assert 590 < state["next_run"] - time.time() <= 600
+    assert state["policy"]["daily_bytes"] == 512 * 1024**2
+    assert backup.db.read("daily")["bytes"] == 1000

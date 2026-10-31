@@ -3,6 +3,7 @@
 import threading
 import time
 from datetime import datetime, timedelta
+from datetime import time as daytime
 from zoneinfo import ZoneInfo
 
 from . import progress, service, storage
@@ -45,10 +46,38 @@ class BackupManager:
             self.thread = threading.Thread(target=self.run, name="v360-backup", daemon=True)
             self.thread.start()
 
+    def archive_summary(self):
+        """Counts describe indexed records, never a promise of SD completeness."""
+        if not self.config:
+            return {}
+        try:
+            did = Settings.load(self.config).did
+        except CameraError:
+            return {}
+        with self.db.connection() as db:
+            counts = dict(
+                db.execute(
+                    "SELECT state, COUNT(*) FROM recordings WHERE device_id=? GROUP BY state",
+                    (did,),
+                ).fetchall()
+            )
+            saved_bytes = db.execute(
+                "SELECT COALESCE(SUM(bytes),0) FROM recordings WHERE device_id=? AND state='verified'",
+                (did,),
+            ).fetchone()[0]
+        return {
+            "saved": counts.get("verified", 0),
+            "saved_bytes": saved_bytes,
+            "pending": sum(v for k, v in counts.items() if k not in ("verified", "evicted")),
+            "failed": counts.get("failed", 0),
+            "evicted": counts.get("evicted", 0),
+        }
+
     def snapshot(self):
         with self.guard:
             return {
                 "policy": self.db.policy(),
+                "archive": self.archive_summary(),
                 **self.state,
                 "running": self.running,
                 "scheduler_started": bool(self.thread and self.thread.is_alive()),
@@ -145,7 +174,7 @@ class BackupManager:
 
         hook = progress.callback.set(on_progress)
         self.jobs.update_job(job_id, state="running", kind="automatic_backup")
-        self.update(state="running", last_started=time.time(), error=None)
+        self.update(state="running", last_started=time.time(), error=None, last_file_error=None)
         try:
             cleanup(self.root)
             storage.check_free(self.root)
@@ -163,15 +192,48 @@ class BackupManager:
             self.update(
                 metadata_complete=result["metadata_complete"], queried_records=result["records"]
             )
-            rows = [
-                row
-                for row in self.db.list()
-                if row["device_id"] == settings.did
-                and row["state"] not in ("verified", "evicted")
-                and row["start_local"] >= (end - timedelta(days=7)).isoformat()
-                and row["start_local"] <= end.isoformat()
-            ]
-            rows.sort(key=lambda row: row["start_local"], reverse=True)
+
+            def candidates():
+                rows = [
+                    row
+                    for row in self.db.list()
+                    if row["device_id"] == settings.did
+                    and row["channel"] == 0
+                    and row["state"] not in ("verified", "evicted")
+                    and row["start_local"] >= (end - timedelta(days=30)).isoformat()
+                    and row["start_local"] <= end.isoformat()
+                    and self.retry_ready(row["id"], time.time())
+                ]
+                return sorted(rows, key=lambda row: row["start_local"], reverse=True)
+
+            rows = candidates()
+            # Only query one older day when the recent queue leaves room this round.
+            # Cursor is persisted after a successful query; failures retry the same day.
+            if policy["mode"] == "server" and len(rows) < policy["batch_files"]:
+                progress.check_cancelled()
+                cursor_key = "backfill:" + settings.did
+                cursor = self.db.read(cursor_key, {})
+                offset = cursor.get("offset", 1)
+                today = end.date()
+                day_to_query = today - timedelta(days=offset)
+                start = datetime.combine(day_to_query, daytime.min)
+                try:
+                    historical = service.discover(
+                        self.config, 0, start, start + timedelta(days=1) - timedelta(seconds=1)
+                    )
+                except CameraError as error:
+                    if error.code in ("backup_yielded", "device_authentication", "sdk_initialize"):
+                        raise
+                    self.update(backfill_error=error.code)
+                else:
+                    self.db.write(cursor_key, {"offset": offset % 29 + 1})
+                    self.update(
+                        backfill_day=day_to_query.isoformat(),
+                        backfill_complete=historical["metadata_complete"],
+                        backfill_horizon_days=30,
+                        backfill_error=None,
+                    )
+                rows = candidates()
             attempts = 0
             for row in rows:
                 progress.check_cancelled()
@@ -199,6 +261,13 @@ class BackupManager:
                     self.update(last_file_error=error.code)
                     if error.code == "backup_budget":
                         break
+            if (
+                policy["mode"] == "server"
+                and downloaded > 0
+                and candidates()
+                and accounting["bytes"] < policy["daily_bytes"]
+            ):
+                next_run = min(next_run, time.time() + 600)
             self.update(
                 state="waiting",
                 last_finished=time.time(),
