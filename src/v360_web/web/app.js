@@ -8,12 +8,12 @@ let chunks = [], mime = null, playing = false, requestGeneration = 0, serviceSto
 let viewerId=null;
 const ptzButtons=()=>document.querySelectorAll('[data-direction]');
 const labels = {starting:"正在连接",live:"正在观看",stopped:"已停止",failed:"连接失败"};
-const errors = {camera_busy:"摄像头正在处理其他任务，请稍后重试。",viewer_limit:"观看人数已达上限。",session_limit:"本次观看已达 30 分钟，请重新连接。",read_timeout:"摄像头暂时没有返回画面，请重新连接。",sdk_connect:"摄像头连接失败，请稍后重试。",live_sequence:"视频传输中断，请重新连接。"};
+const errors = {live_audio_format:'声音格式发生变化，请重新连接。',live_audio_sequence:'声音传输中断，请重新连接。',camera_busy:"摄像头正在处理其他任务，请稍后重试。",viewer_limit:"观看人数已达上限。",session_limit:"本次观看已达 30 分钟，请重新连接。",read_timeout:"摄像头暂时没有返回画面，请重新连接。",sdk_connect:"摄像头连接失败，请稍后重试。",live_sequence:"视频传输中断，请重新连接。"};
 function status(text) {$('notice').textContent=text;}
 function resetPlayer(message="已停止观看。") {
   if(viewerId&&signedIn)sendMove('stop');viewerId=null;ptzButtons().forEach(b=>b.disabled=true);requestGeneration++; playing=false;
   if(socket){const previous=socket;socket=null;previous.close();}
-  $('video').pause();$('video').removeAttribute('src');$('video').load();
+  $('video').pause();$('video').muted=true;$('sound').disabled=true;$('sound').textContent='开启声音';$('sound').setAttribute('aria-pressed','false');$('audio-state').textContent='连接后可开启声音';$('video').removeAttribute('src');$('video').load();
   if(objectURL)URL.revokeObjectURL(objectURL);
   objectURL=null;media=source=null;chunks=[];mime=null;
   $('start').disabled=false;$('stop').disabled=true;$('empty').hidden=false;
@@ -71,7 +71,7 @@ $('start').addEventListener('click',()=>{
     if(typeof event.data==='string'){
       const data=JSON.parse(event.data);
       if(data.type==='state'){viewerId=data.viewer_id;}
-      else if(data.type==='init'){mime=data.mime;prepare();ptzButtons().forEach(b=>b.disabled=false);}
+      else if(data.type==='init'){mime=data.mime;prepare();$('sound').disabled=!data.audio;$('audio-state').textContent=data.audio?'声音可用 · 默认静音':'本次连接暂无声音';ptzButtons().forEach(b=>b.disabled=false);}
       else if(data.type==='error' || data.type==='ended')fail(errors[data.error] || '直播连接已结束，可重新开始观看。');
     }else{if(chunks.length>=8){fail('网络或浏览器播放过慢，请重新连接。');return;}chunks.push(event.data);pump();}
   };
@@ -141,3 +141,6 @@ $('backup-now').addEventListener('click',async()=>{try{await api('/api/backup/ru
 setInterval(()=>{if(signedIn&&!serviceStopped&&replayKey)api('/api/recordings/'+replayKey+'/lease',{method:'POST'}).catch(()=>{});},60000);
 
 restoreLogin();
+
+$('sound').addEventListener('click',()=>{const v=$('video');v.muted=!v.muted;if(!v.muted&&v.volume===0)v.volume=1;v.play().catch(()=>status('请点击播放器播放按钮后重试。'));});
+$('video').addEventListener('volumechange',()=>{if($('sound').disabled)return;const audible=!$('video').muted&&$('video').volume>0;$('sound').textContent=audible?'静音':'开启声音';$('sound').setAttribute('aria-pressed',String(audible));$('audio-state').textContent=audible?'声音已开启':'声音已静音';});

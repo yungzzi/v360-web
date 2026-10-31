@@ -24,17 +24,27 @@ MAX_BOX = 2 * 1024**2
 MAX_VIEWERS = 3
 
 
+@dataclass(frozen=True)
+class LivePacket:
+    kind: str
+    data: bytes
+
+
 def camera_frames(config: Path, stop: threading.Event, controls=None):
     settings = Settings.load(config)
     client = CameraClient(settings)
     client.bridge.timeout = min(client.bridge.timeout, 10)
     with client as camera:
-        previous = None
+        previous = audio_previous = None
         keep = time.monotonic()
+        first_video = None
+        pending, pending_bytes = [], 0
+        audio_mode = None
         try:
             camera.send(
                 wire.LIVE_START, wire.live_payload(2, 0 if settings.shared else settings.user_id)
             )
+            camera.send(wire.AUDIO_START, struct.pack("<I", 0))
             if controls:
                 controls.attach(camera)
             while not stop.is_set():
@@ -42,6 +52,37 @@ def camera_frames(config: Path, stop: threading.Event, controls=None):
                 header = wire.parse_live_header(
                     camera.bridge.read_exact(camera.session, settings.live_channel, 32, deadline)
                 )
+                data = (
+                    camera.bridge.read_exact(
+                        camera.session, settings.live_channel, header.size, deadline
+                    )
+                    if header.size
+                    else b""
+                )
+                if header.flag == wire.LIVE_AUDIO:
+                    if audio_mode is None:
+                        audio_mode = header.codec == 82 and header.subchannel == 0
+                        yield LivePacket("config", b"alaw" if audio_mode else b"")
+                        yield from pending
+                        pending, pending_bytes = [], 0
+                    if audio_mode:
+                        if (
+                            header.codec != 82
+                            or header.subchannel != 0
+                            or not 1 <= len(data) <= 8000
+                        ):
+                            raise CameraError("live_audio_format", "Live audio format changed.")
+                        if audio_previous is not None:
+                            missing = (header.sequence - audio_previous - 1) & 0xFFFFFFFF
+                            if missing:
+                                if missing > 25 or len(data) != 320:
+                                    raise CameraError(
+                                        "live_audio_sequence", "Live audio interrupted."
+                                    )
+                                yield LivePacket("audio", bytes([0xD5]) * (320 * missing))
+                        audio_previous = header.sequence
+                        yield LivePacket("audio", data)
+                    continue
                 if (
                     header.flag not in (wire.LIVE_FIRST, wire.LIVE_VIDEO, wire.LIVE_TARGET)
                     or header.codec != 5
@@ -52,34 +93,46 @@ def camera_frames(config: Path, stop: threading.Event, controls=None):
                 if previous is None:
                     if header.flag != wire.LIVE_FIRST or header.frame_type not in (1, 17):
                         raise CameraError("live_start", "Live stream did not start at a key frame.")
+                    first_video = time.monotonic()
                 elif header.sequence != (previous + 1) & 0xFFFFFFFF:
                     raise CameraError(
                         "live_sequence", "Live video frame sequence is discontinuous."
                     )
-                data = camera.bridge.read_exact(
-                    camera.session, settings.live_channel, header.size, deadline
-                )
                 if not data.startswith((b"\0\0\1", b"\0\0\0\1")):
                     raise CameraError("live_format", "Live video is not Annex B.")
                 previous = header.sequence
                 if time.monotonic() - keep >= 5:
                     camera.send(wire.KEEP_ALIVE, struct.pack("<I", 10))
                     keep = time.monotonic()
-                yield data
+                packet = LivePacket("video", data)
+                if audio_mode is None:
+                    pending.append(packet)
+                    pending_bytes += len(data)
+                    if time.monotonic() - first_video >= 2 or pending_bytes >= 4 * 1024**2:
+                        audio_mode = False
+                        yield LivePacket("config", b"")
+                        yield from pending
+                        pending, pending_bytes = [], 0
+                else:
+                    yield packet
         finally:
             if controls:
                 controls.close()
+            try:
+                camera.send(wire.AUDIO_STOP, struct.pack("<I", 0))
+            except (CameraError, OSError):
+                pass
             try:
                 camera.send(wire.LIVE_STOP, bytes(4))
             except (CameraError, OSError):
                 pass
 
 
-def encoder_command():
+def encoder_command(audio_fd=None):
     executable = find_tool("ffmpeg")
     if not executable:
         raise CameraError("ffmpeg_missing", "FFmpeg is required for browser playback.")
-    return [
+    command = [
         executable,
         "-nostdin",
         "-v",
@@ -91,15 +144,43 @@ def encoder_command():
         "65536",
         "-analyzeduration",
         "100000",
+        "-thread_queue_size",
+        "32",
         "-r",
         "15",
         "-f",
         "hevc",
         "-i",
         "pipe:0",
-        "-map",
-        "0:v:0",
-        "-an",
+    ]
+    if audio_fd is not None:
+        command += [
+            "-thread_queue_size",
+            "64",
+            "-f",
+            "alaw",
+            "-ar",
+            "8000",
+            "-ac",
+            "1",
+            "-i",
+            f"pipe:{audio_fd}",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "24k",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+        ]
+    else:
+        command += ["-map", "0:v:0", "-an"]
+    return command + [
         "-c:v",
         "libx264",
         "-threads",
@@ -175,7 +256,8 @@ class FragmentReader:
                         raise CameraError("encoder_codec", "Missing AVC configuration.")
                     codec = initialization[at + 5 : at + 8].hex()
                     ready = True
-                    yield "init", (f'video/mp4; codecs="avc1.{codec}"', initialization)
+                    audio_codec = ",mp4a.40.2" if b"mp4a" in initialization else ""
+                    yield "init", (f'video/mp4; codecs="avc1.{codec}{audio_codec}"', initialization)
             elif kind == b"moof":
                 if pending is not None:
                     raise CameraError("encoder_frame", "Incomplete media fragment.")
@@ -210,7 +292,7 @@ class StreamManager:
         self.initialization = None
         self.state = "stopped"
         self.error = None
-        self.frames = self.fragments = 0
+        self.frames = self.fragments = self.audio_frames = 0
         self.encoder_pid = None
         self.shutdown_requested = False
         self.controls = CameraControls()
@@ -224,7 +306,8 @@ class StreamManager:
                 "error": self.error,
                 "frames": self.frames,
                 "fragments": self.fragments,
-                "audio": False,
+                "audio": bool(self.initialization and "mp4a.40.2" in self.initialization[0]),
+                "audio_frames": self.audio_frames,
                 "session_limit_seconds": 1800,
                 "control_error": self.controls.error,
                 "ptz_active": bool(self.controls.sent),
@@ -247,7 +330,7 @@ class StreamManager:
                 self.stop.clear()
                 self.initialization = None
                 self.state, self.error = "starting", None
-                self.frames = self.fragments = 0
+                self.frames = self.fragments = self.audio_frames = 0
             viewer = Subscriber()
             self.viewers.add(viewer)
             if self.initialization:
@@ -305,20 +388,32 @@ class StreamManager:
                 self.error = getattr(error, "code", "encoder_io")
                 self.stop.set()
 
-    def _write(self, process, data):
-        offset = 0
-        deadline = time.monotonic() + 5
-        while offset < len(data) and not self.stop.is_set():
-            if time.monotonic() >= deadline:
-                raise CameraError("encoder_timeout", "Video encoder input stalled.")
-            if select.select([], [process.stdin], [], 0.2)[1]:
+    def _feed(self, fd, messages):
+        try:
+            while not self.stop.is_set():
                 try:
-                    offset += os.write(process.stdin.fileno(), data[offset:])
-                except BlockingIOError:
+                    data = messages.get(timeout=0.2)
+                except queue.Empty:
                     continue
+                offset, deadline = 0, time.monotonic() + 5
+                while offset < len(data) and not self.stop.is_set():
+                    if time.monotonic() > deadline:
+                        raise CameraError("encoder_timeout", "Media encoder input stalled.")
+                    if select.select([], [fd], [], 0.2)[1]:
+                        try:
+                            offset += os.write(fd, data[offset:])
+                        except BlockingIOError:
+                            continue
+        except (CameraError, OSError) as error:
+            if not self.stop.is_set():
+                self.error = getattr(error, "code", "encoder_io")
+                self.stop.set()
 
     def _run(self):
         process = output = source = None
+        audio_read = audio_write = None
+        feeders, inputs = [], {}
+        audio = False
         started = time.monotonic()
         try:
             source = (
@@ -326,28 +421,59 @@ class StreamManager:
                 if self.source_factory is camera_frames
                 else self.source_factory(self.config, self.stop)
             )
-            for data in source:
+            for item in source:
                 if self.stop.is_set():
                     break
                 if time.monotonic() - started >= 1800:
                     self.error = "session_limit"
                     break
+                if isinstance(item, LivePacket):
+                    if item.kind == "config":
+                        audio = item.data == b"alaw"
+                        continue
+                    kind, data = item.kind, item.data
+                else:
+                    kind, data = "video", item
                 if process is None:
+                    if audio:
+                        audio_read, audio_write = os.pipe()
                     process = subprocess.Popen(
-                        encoder_command(),
+                        encoder_command(audio_read) if audio else encoder_command(),
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL,
                         bufsize=0,
+                        pass_fds=(audio_read,) if audio else (),
                     )
+                    if audio_read is not None:
+                        os.close(audio_read)
+                        audio_read = None
                     self.encoder_pid = process.pid
-                    os.set_blocking(process.stdin.fileno(), False)
+                    for name, fd, capacity in (
+                        ("video", process.stdin.fileno(), 32),
+                        *(([("audio", audio_write, 64)]) if audio else []),
+                    ):
+                        os.set_blocking(fd, False)
+                        inputs[name] = queue.Queue(maxsize=capacity)
+                        feeder = threading.Thread(
+                            target=self._feed, args=(fd, inputs[name]), daemon=True
+                        )
+                        feeders.append(feeder)
+                        feeder.start()
                     output = threading.Thread(
                         target=self._read_output, args=(process,), daemon=True
                     )
                     output.start()
-                self._write(process, data)
-                self.frames += 1
+                if kind not in inputs or len(data) > MAX_BOX:
+                    raise CameraError("live_format", "Invalid media input.")
+                try:
+                    inputs[kind].put(data, timeout=5)
+                except queue.Full as error:
+                    raise CameraError("encoder_timeout", "Media input queue is full.") from error
+                if kind == "video":
+                    self.frames += 1
+                else:
+                    self.audio_frames += 1
         except CameraError as error:
             if not self.stop.is_set():
                 self.error = error.code
@@ -361,6 +487,11 @@ class StreamManager:
                     source.close()
                 except Exception:  # noqa: BLE001 -- finish encoder and lock cleanup too
                     self.error = self.error or "camera_cleanup"
+            for feeder in feeders:
+                feeder.join(timeout=2)
+            for fd in (audio_read, audio_write):
+                if fd is not None:
+                    os.close(fd)
             if process:
                 process.stdin.close()
                 try:

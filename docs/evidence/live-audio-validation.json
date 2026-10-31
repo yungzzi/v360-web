@@ -1,0 +1,39 @@
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "h264",
+      "sample_rate": null,
+      "start_time": "0.000000",
+      "duration": "12.064063"
+    },
+    {
+      "codec_type": "audio",
+      "codec_name": "aac",
+      "sample_rate": "16000",
+      "start_time": "0.000000",
+      "duration": "12.096000"
+    }
+  ],
+  "decoded_audio_seconds": 12.096,
+  "audio_nonzero": true,
+  "final_state": {
+    "state": "stopped",
+    "viewers": 0,
+    "error": null,
+    "frames": 700,
+    "fragments": 45,
+    "audio": false,
+    "audio_frames": 1150,
+    "session_limit_seconds": 1800,
+    "control_error": null,
+    "ptz_active": false
+  },
+  "scope": "local camera and desktop browser short session",
+  "audio_codec_wire": 82,
+  "audio_input_rate": 8000,
+  "browser_default_muted": true,
+  "browser_unmute_toggle_passed": true,
+  "human_listening_acceptance": false,
+  "cloud_deployment": "pending"
+}
