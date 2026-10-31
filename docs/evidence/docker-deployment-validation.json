@@ -1,0 +1,46 @@
+{
+  "scope": "Docker Desktop Linux container in WSL, real camera; not Aliyun",
+  "valid_records": 171,
+  "catalog_complete": false,
+  "saved_originals": 2,
+  "playback_seconds": 15.064,
+  "range_status": 206,
+  "live_bytes": 218072,
+  "first_video_seconds": 1.493,
+  "live_viewers_after": 0,
+  "live_state_after": "stopped",
+  "non_root": true,
+  "read_only_rootfs": true,
+  "kernel_limits": {
+    "memory.max": "805306368",
+    "memory.swap.max": "0",
+    "memory.peak": "156053504",
+    "cpu.max": "100000 100000",
+    "pids.max": "256"
+  },
+  "automatic_backup": "paused; bounded manual acceptance only",
+  "original_files": 2,
+  "original_bytes": 2884896,
+  "image_bytes": 591841073,
+  "upgrade": {
+    "ready": true,
+    "old_revision": "deployment-qa-v1",
+    "new_revision": "deployment-qa-v2",
+    "pre_upgrade_backup_verified": true
+  },
+  "restore": {
+    "online_restore_refused": true,
+    "offline_restore_succeeded": true,
+    "all_original_file_hashes_preserved": true,
+    "automatic_backup_paused": true
+  },
+  "clean_shutdown": {
+    "exit_code": 143,
+    "application_shutdown_complete_logged": true,
+    "oom_killed": false
+  },
+  "tests_passed": 112,
+  "private_mounts_absent_from_image": true,
+  "docker_hub_push_pull_tested": false,
+  "aliyun_tested": false
+}

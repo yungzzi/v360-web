@@ -10,7 +10,7 @@ from .config import Settings, read_private_json, write_private_json
 from .errors import CameraError
 from .maintenance import cleanup, protect
 from .media import find_tool, probe, validate_decode
-from .progress import report
+from .progress import check_cancelled, report
 from .storage import admit, check_free
 from .store import RecordingStore
 
@@ -122,6 +122,7 @@ def prepare(config: Path, key: str):
     deadline = time.monotonic() + 120
     try:
         while process.poll() is None:
+            check_cancelled()
             if time.monotonic() > deadline:
                 raise CameraError(
                     "preview_timeout", "Playback preparation exceeded its time limit."

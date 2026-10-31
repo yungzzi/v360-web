@@ -5,9 +5,14 @@ import resource
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-runtime = root / ".private/android-runtime-arm64"
-qemu = root / ".tools/phone-free/sysroot/usr/bin/qemu-aarch64"
-worker = root / ".tools/phone-free/build/native-worker-probe"
+runtime_root = Path(os.environ.get("V360_RUNTIME_ROOT", str(root / ".private")))
+runtime = runtime_root / "android-runtime-arm64"
+qemu = Path(
+    os.environ.get("V360_QEMU", str(root / ".tools/phone-free/sysroot/usr/bin/qemu-aarch64"))
+)
+worker = Path(
+    os.environ.get("V360_WORKER_PATH", str(root / ".tools/phone-free/build/native-worker-probe"))
+)
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 os.execv(
     str(qemu),
@@ -16,7 +21,7 @@ os.execv(
         "-L",
         str(runtime),
         "-E",
-        "LD_LIBRARY_PATH=" + str(runtime) + ":" + str(root / ".private/android-libs/arm64-v8a"),
+        "LD_LIBRARY_PATH=" + str(runtime) + ":" + str(runtime_root / "android-libs/arm64-v8a"),
         str(worker),
     ],
 )

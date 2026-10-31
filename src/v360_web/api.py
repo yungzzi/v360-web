@@ -2,8 +2,10 @@ import asyncio
 import hmac
 import ipaddress
 import json
+import os
 import queue
 import secrets
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -75,6 +77,7 @@ def create_app(
     store = RecordingStore(root)
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v360-camera")
     lock = threading.Lock()
+    stopping = threading.Event()
     jobs = JobStore(root)
     jobs.recover_interrupted()
     backup = BackupManager(root, config_path, lock)
@@ -93,6 +96,7 @@ def create_app(
         if start_backup:
             backup.start()
         yield
+        stopping.set()
         await asyncio.to_thread(backup.close)
         await asyncio.to_thread(streams.close)
         pool.shutdown(wait=True, cancel_futures=True)
@@ -162,7 +166,7 @@ def create_app(
             max_age=3600,
             httponly=True,
             samesite="strict",
-            secure=request.url.scheme == "https",
+            secure=request.url.scheme == "https" or os.environ.get("V360_SECURE_COOKIES") == "1",
             path="/api/",
         )
         return {"ready": True}
@@ -176,6 +180,8 @@ def create_app(
     def submit(function, *args):
         if config_path is None:
             raise HTTPException(503, "Camera profile has not been configured")
+        if stopping.is_set():
+            raise HTTPException(503, "Service is stopping")
         backup.request_yield()
         if not lock.acquire(timeout=1):
             raise HTTPException(409, "A camera operation is already running")
@@ -184,6 +190,7 @@ def create_app(
 
         def run():
             jobs.update_job(job_id, state="running")
+            cancellation = progress.shutdown_event.set(stopping)
             hook = progress.callback.set(lambda value: jobs.update_job(job_id, progress=value))
             try:
                 jobs.update_job(job_id, state="complete", result=function(config_path, *args))
@@ -193,6 +200,7 @@ def create_app(
                 jobs.update_job(job_id, state="failed", error="operation_failed")
             finally:
                 progress.callback.reset(hook)
+                progress.shutdown_event.reset(cancellation)
                 lock.release()
 
         pool.submit(run)
@@ -201,6 +209,25 @@ def create_app(
     @app.get("/health")
     def health():
         return {"service": "v360-web", "version": __version__}
+
+    @app.get("/ready")
+    def ready():
+        try:
+            with store.connection() as db:
+                db.execute("SELECT id FROM recordings LIMIT 1").fetchone()
+            scheduler = backup.snapshot()["scheduler_started"]
+            healthy = not stopping.is_set() and (not start_backup or scheduler)
+            if not healthy:
+                raise HTTPException(503, "Service is not ready")
+            return {
+                "ready": True,
+                "version": __version__,
+                "revision": os.environ.get("V360_REVISION", "working-tree"),
+                "scheduler_started": scheduler,
+                "camera_checked": False,
+            }
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, "Data directory unavailable") from error
 
     @app.get("/api/status", dependencies=[Depends(authorize)])
     def status(request: Request):

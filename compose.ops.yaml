@@ -1,0 +1,10 @@
+# Use only with `compose run` for metadata backup, never as a second server.
+services:
+  v360:
+    network_mode: none
+    volumes:
+      - type: bind
+        source: ${V360_HOME:-/srv/v360-web}/backups
+        target: /app/backups
+        bind:
+          create_host_path: false

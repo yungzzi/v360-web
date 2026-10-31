@@ -8,7 +8,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .errors import CameraError
-from .progress import cancel_event, check_cancelled
+from .progress import cancel_event, check_cancelled, shutdown_event
 
 
 def find_tool(name: str):
@@ -17,12 +17,39 @@ def find_tool(name: str):
     return found or (str(local) if local.is_file() else None)
 
 
+def run_media(command, *, capture_output, check, timeout):
+    if cancel_event.get() is None and shutdown_event.get() is None:
+        return subprocess.run(command, capture_output=capture_output, check=check, timeout=timeout)
+    check_cancelled()
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            check_cancelled()
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                output, _ = process.communicate(timeout=0.2)
+                return subprocess.CompletedProcess(command, process.returncode, output, b"")
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        process.stdout.close()
+
+
 def probe(path: Path):
     executable = find_tool("ffprobe")
     if executable is None:
         raise CameraError("ffprobe_missing", "ffprobe is required to validate downloaded media.")
     try:
-        result = subprocess.run(
+        result = run_media(
             [executable, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
             capture_output=True,
             check=False,
@@ -43,7 +70,7 @@ def validate_decode(path: Path):
     if executable is None:
         raise CameraError("ffmpeg_missing", "ffmpeg is required for an independent decode check.")
     check_cancelled()
-    if cancel_event.get() is not None:
+    if cancel_event.get() is not None or shutdown_event.get() is not None:
         process = subprocess.Popen(
             [
                 executable,
@@ -82,7 +109,7 @@ def validate_decode(path: Path):
                     process.kill()
                     process.wait(timeout=2)
     try:
-        result = subprocess.run(
+        result = run_media(
             [
                 executable,
                 "-v",
@@ -123,7 +150,7 @@ def make_live_preview(source: Path, target: Path, info: dict):
             "live_timing", "Live bitstream does not declare a supported frame rate."
         ) from exc
     try:
-        result = subprocess.run(
+        result = run_media(
             [
                 executable,
                 "-nostdin",

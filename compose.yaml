@@ -1,0 +1,52 @@
+name: v360-web
+services:
+  v360:
+    image: ${V360_IMAGE:?Set V360_IMAGE to the versioned Docker Hub image}
+    user: "${V360_UID:-1000}:${V360_GID:-1000}"
+    command: ["--config", "/app/config/device.json", "--port", "8080"]
+    ports:
+      - "127.0.0.1:${V360_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ${V360_HOME:-/srv/v360-web}/config
+        target: /app/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${V360_HOME:-/srv/v360-web}/runtime
+        target: /app/runtime
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${V360_HOME:-/srv/v360-web}/data
+        target: /app/data
+        bind:
+          create_host_path: false
+    environment:
+      V360_SECURE_COOKIES: "${V360_SECURE_COOKIES:-1}"
+      V360_TRUSTED_PROXIES: "${V360_TRUSTED_PROXIES:-}"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: "1.0"
+    mem_limit: 768m
+    memswap_limit: 768m
+    pids_limit: 256
+    stop_grace_period: 2m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
