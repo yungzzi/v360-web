@@ -1,0 +1,12 @@
+{
+  "scope": "local Docker Nginx proxy and Edge with /v360/",
+  "tests_passed": 114,
+  "browser_login": true,
+  "playback_ready_state": 4,
+  "playback_seconds": 15.048,
+  "live_ready_state": 4,
+  "live_resolution": [640, 360],
+  "cookie_path": "/v360/api/",
+  "live_stopped_after_check": true,
+  "server_acceptance": false
+}

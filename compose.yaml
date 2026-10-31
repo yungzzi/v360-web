@@ -25,6 +25,7 @@ services:
         bind:
           create_host_path: false
     environment:
+      V360_ROOT_PATH: "${V360_ROOT_PATH:-}"
       V360_SECURE_COOKIES: "${V360_SECURE_COOKIES:-1}"
       V360_TRUSTED_PROXIES: "${V360_TRUSTED_PROXIES:-}"
     init: true

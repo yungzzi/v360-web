@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>家庭监控 · V360</title><link rel="stylesheet" href="/assets/style.css"><script defer src="/assets/app.js"></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>家庭监控 · V360</title><link rel="stylesheet" href="assets/style.css"><script defer src="assets/app.js"></script></head>
 <body>
-<header><a class="brand" href="/">V<span>360</span><small>家庭监控</small></a><div class="header-right"><span class="private">私人空间</span><button id="logout" class="quiet" hidden>退出登录</button></div></header>
+<header><a class="brand" href="./">V<span>360</span><small>家庭监控</small></a><div class="header-right"><span class="private">私人空间</span><button id="logout" class="quiet" hidden>退出登录</button></div></header>
 <main>
 <section id="login" class="login-card"><p class="eyebrow">欢迎回来</p><h1>家里的画面，<br>随时看见。</h1><p class="muted">验证身份后，即可开始观看你的摄像头。</p><form id="login-form"><label for="token">网页访问令牌</label><input id="token" type="password" autocomplete="off" required placeholder="输入本机生成的访问令牌"><button type="submit" class="primary">进入监控台 <span>→</span></button></form><p id="login-message" role="status" class="muted">令牌仅在当前页面内使用，刷新后需要重新输入。</p></section>
 <section id="dashboard" hidden><nav class="section-tabs" aria-label="监控功能"><button id="tab-live" class="selected">实时观看</button><button id="tab-library">历史录像</button></nav><div id="live-panel">
