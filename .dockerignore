@@ -1,0 +1,15 @@
+# Allow only explicitly reviewed build inputs.
+**
+!Dockerfile
+!deploy/
+!deploy/requirements.txt
+!deploy/collect_runtime.py
+!src/
+!src/v360_web/
+!src/v360_web/*.py
+!src/v360_web/web/
+!src/v360_web/web/*.html
+!src/v360_web/web/*.css
+!src/v360_web/web/*.js
+!tools/
+!tools/run_native_worker.py

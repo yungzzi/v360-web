@@ -200,19 +200,22 @@ def main():
             def shutdown():
                 server.should_exit = True
 
-            app = create_app(
-                root,
-                token,
-                args.config,
-                shutdown_callback=None if args.no_local_controls else shutdown,
-                start_backup=True,
-            )
-            server = uvicorn.Server(
-                uvicorn.Config(
-                    app, host="127.0.0.1", port=args.port, access_log=False, ws_max_size=4096
+            from .instance import InstanceLock
+
+            with InstanceLock(root):
+                app = create_app(
+                    root,
+                    token,
+                    args.config,
+                    shutdown_callback=None if args.no_local_controls else shutdown,
+                    start_backup=True,
                 )
-            )
-            server.run()
+                server = uvicorn.Server(
+                    uvicorn.Config(
+                        app, host="127.0.0.1", port=args.port, access_log=False, ws_max_size=4096
+                    )
+                )
+                server.run()
     except (EOFError, KeyboardInterrupt):
         output({"error": "cancelled", "message": "Local operation cancelled."})
         return 130
