@@ -287,3 +287,37 @@ def test_long_recording_window_seek_tail_and_cache_cleanup(prepared, tmp_path, m
     assert playback.ready(root, key, 30) is None
     assert playback.ready(root, key, 60) is None
     assert store.media_path(key) == source
+
+
+def test_prefetch_yields_to_foreground_and_duplicate_cannot_displace_it(prepared, monkeypatch):
+    import threading
+    import time
+
+    root, _store, key, config = prepared
+    entered = threading.Event()
+    cancelled = threading.Event()
+
+    def prepare(config, key, start=None):
+        if start == 30:
+            entered.set()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    progress.check_cancelled()
+                except CameraError:
+                    cancelled.set()
+                    raise
+                time.sleep(0.01)
+            raise AssertionError("Background work was not cancelled")
+        return {"start": start}
+
+    monkeypatch.setattr(playback, "prepare", prepare)
+    with TestClient(create_app(root, TOKEN, config, start_backup=False)) as client:
+        assert client.post(f"/api/jobs/prefetch/{key}?start=30").status_code == 401
+        bg = client.post(f"/api/jobs/prefetch/{key}?start=30", headers=HEADERS).json()
+        assert entered.wait(2)
+        assert client.post(f"/api/jobs/prefetch/{key}?start=60", headers=HEADERS).status_code == 409
+        fg = client.post(f"/api/jobs/playback/{key}?start=60", headers=HEADERS)
+        assert fg.status_code == 202 and cancelled.is_set()
+    assert JobStore(root).get_job(bg["id"])["state"] == "failed"
+    assert JobStore(root).get_job(fg.json()["id"])["result"]["start"] == 60

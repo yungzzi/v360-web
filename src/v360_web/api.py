@@ -83,11 +83,20 @@ def create_app(
     store = RecordingStore(root)
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v360-camera")
     lock = threading.Lock()
+    prefetch_guard = threading.Lock()
+    prefetch_state = {"cancel": None, "waiters": 0}
     stopping = threading.Event()
     jobs = JobStore(root)
     jobs.recover_interrupted()
     backup = BackupManager(root, config_path, lock)
-    streams = StreamManager(config_path, lock, before_subscribe=backup.request_yield)
+
+    def yield_background():
+        with prefetch_guard:
+            if prefetch_state["cancel"] is not None:
+                prefetch_state["cancel"].set()
+        backup.request_yield()
+
+    streams = StreamManager(config_path, lock, before_subscribe=yield_background)
     media_sessions = {}
     sessions = SessionStore(root, access_token)
     bearer = HTTPBearer(auto_error=False)
@@ -241,20 +250,39 @@ def create_app(
         )
         return {"closed": True}
 
-    def submit(function, *args):
+    def submit(function, *args, background=False):
         if config_path is None:
             raise HTTPException(503, "Camera profile has not been configured")
         if stopping.is_set():
             raise HTTPException(503, "Service is stopping")
-        backup.request_yield()
-        if not lock.acquire(timeout=1):
-            raise HTTPException(409, "A camera operation is already running")
+        cancel = threading.Event() if background else None
+        if background:
+            with prefetch_guard:
+                if prefetch_state["waiters"] or not lock.acquire(blocking=False):
+                    raise HTTPException(409, "Foreground work has priority")
+                prefetch_state["cancel"] = cancel
+        else:
+            with prefetch_guard:
+                prefetch_state["waiters"] += 1
+                if prefetch_state["cancel"] is not None:
+                    prefetch_state["cancel"].set()
+            backup.request_yield()
+            try:
+                acquired = lock.acquire(timeout=3)
+            finally:
+                with prefetch_guard:
+                    prefetch_state["waiters"] -= 1
+            if not acquired:
+                raise HTTPException(409, "A camera operation is already running")
         job_id = secrets.token_hex(16)
-        jobs.update_job(job_id, state="queued", kind=function.__name__)
+        jobs.update_job(
+            job_id, state="queued", kind="prefetch" if background else function.__name__
+        )
 
         def run():
             jobs.update_job(job_id, state="running")
             cancellation = progress.shutdown_event.set(stopping)
+            prefetch_hook = progress.cancel_event.set(cancel)
             hook = progress.callback.set(lambda value: jobs.update_job(job_id, progress=value))
             try:
                 jobs.update_job(job_id, state="complete", result=function(config_path, *args))
@@ -263,6 +291,10 @@ def create_app(
             except Exception:  # noqa: BLE001 -- fail the task without exposing unexpected credential data
                 jobs.update_job(job_id, state="failed", error="operation_failed")
             finally:
+                progress.cancel_event.reset(prefetch_hook)
+                with prefetch_guard:
+                    if background and prefetch_state["cancel"] is cancel:
+                        prefetch_state["cancel"] = None
                 progress.callback.reset(hook)
                 progress.shutdown_event.reset(cancellation)
                 lock.release()
@@ -548,6 +580,17 @@ def create_app(
         key: str, start: int | None = Query(default=None, ge=0, lt=3600, multiple_of=30)
     ):
         return submit(playback.prepare, key, start)
+
+    @app.post("/api/jobs/prefetch/{key}", status_code=202, dependencies=[Depends(authorize)])
+    def prefetch_playback(key: str, start: int = Query(ge=0, lt=3600, multiple_of=30)):
+        return submit(playback.prepare, key, start, background=True)
+
+    @app.delete("/api/playback/prefetch", dependencies=[Depends(authorize)])
+    def cancel_prefetch():
+        with prefetch_guard:
+            if prefetch_state["cancel"] is not None:
+                prefetch_state["cancel"].set()
+        return {"cancel_requested": True}
 
     @app.post("/api/jobs/list", status_code=202, dependencies=[Depends(authorize)])
     def list_job(body: ListRequest):

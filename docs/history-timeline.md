@@ -39,3 +39,11 @@ Uncached recordings now prepare the aligned 30-second window containing the chos
 The browser subtracts the window start for player seeking and adds it for camera-local timeline display. At a window end it prepares the next window automatically, stopping at the original end. First preparation is bounded to one window, but uncached window boundaries can still pause while the next window is prepared. Background prefetch and seamless concatenation are follow-up work, not implemented in this first stage. Full-resolution originals remain unchanged.
 
 Local integration checks cover a 65-second synthetic recording: middle window 30 seconds, final window 5 seconds, invalid/out-of-range offsets, authenticated access, cache reuse, cleanup without removing originals. Edge fixture acceptance selected 12:00:58, then automatically opened window start=60 (5-second tail), readyState=4. This is synthetic acceptance; server timing and physical camera footage acceptance are separate.
+
+## One-window lookahead
+
+Playback's playing event requests only the next window of the same already-saved recording. A detached poll never blocks player controls or shows foreground-job progress. At the boundary the player reuses the in-flight/result promise. A low-priority prepare occupies the same single worker/operation lock, never another encoder. Duplicate prefetch is rejected. Foreground jobs cancel that worker and acquire the lock with a bounded wait; live requests also request cancellation. Leaving playback requests cancellation, and abandoned network requests remain bounded to one window and the existing preparation deadline. A new selected position replaces the queued intent; waiting for prefetch does not force preparation of obsolete intent.
+
+Cache, source integrity verification, image quality and CPU/memory caps are unchanged. Preparing a window before the old one ends reduces boundary waiting but is not gapless playback: file/player replacement still has loading overhead, and a late seek or a busy server can outpace preparation.
+
+Acceptance: backend worker checks cover duplicate prefetch and foreground cancellation; local Edge fixture progressed from offset 28 to window start=30 at readyState=4 and showed next-window readiness. Physical mobile and real-camera footage acceptance must be reported separately.
