@@ -506,6 +506,14 @@ def create_app(
             raise HTTPException(404, "Prepared recording not found")
         return maintenance.HeldFileResponse(path, root=root, key=key, media_type="video/mp4")
 
+    @app.get("/api/recordings/{key}/window", dependencies=[Depends(authorize_media)])
+    def recording_window(key: str, start: int = Query(ge=0, lt=3600, multiple_of=30)):
+        maintenance.protect(root, key)
+        path = playback.ready(root, key, start)
+        if path is None:
+            raise HTTPException(404, "Prepared window not found")
+        return maintenance.HeldFileResponse(path, root=root, key=key, media_type="video/mp4")
+
     @app.post("/api/recordings/{key}/lease", dependencies=[Depends(authorize)])
     def lease_recording(key: str):
         if store.get(key) is None:
@@ -536,8 +544,10 @@ def create_app(
         return backup.snapshot()
 
     @app.post("/api/jobs/playback/{key}", status_code=202, dependencies=[Depends(authorize)])
-    def prepare_playback(key: str):
-        return submit(playback.prepare, key)
+    def prepare_playback(
+        key: str, start: int | None = Query(default=None, ge=0, lt=3600, multiple_of=30)
+    ):
+        return submit(playback.prepare, key, start)
 
     @app.post("/api/jobs/list", status_code=202, dependencies=[Depends(authorize)])
     def list_job(body: ListRequest):

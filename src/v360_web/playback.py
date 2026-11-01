@@ -16,19 +16,20 @@ from .storage import admit, check_free
 from .store import RecordingStore
 
 
-def paths(root, key):
+def paths(root, key, start=None):
     if not re.fullmatch(r"[0-9a-f]{32}", key):
         raise CameraError("recording_missing", "Recording identifier is invalid.")
     folder = root / "previews"
-    targets = [folder / (key + suffix) for suffix in (".mp4", ".json", ".partial.mp4")]
+    name = key if start is None else key + f".s{start:04d}"
+    targets = [folder / (name + suffix) for suffix in (".mp4", ".json", ".partial.mp4")]
     if any(not p.resolve().is_relative_to(root.resolve()) for p in targets):
         raise CameraError("preview_path", "Preview path is outside its private directory.")
     return targets
 
 
-def ready(root: Path, key: str):
+def ready(root: Path, key: str, start=None):
     try:
-        target, manifest, _ = paths(root, key)
+        target, manifest, _ = paths(root, key, start)
         item = RecordingStore(root).get(key)
         if not item or not RecordingStore(root).media_path(key):
             return None
@@ -45,7 +46,9 @@ def ready(root: Path, key: str):
     return None
 
 
-def prepare(config: Path, key: str):
+def prepare(config: Path, key: str, start=None):
+    if start is not None and (type(start) is not int or not 0 <= start < 3600 or start % 30):
+        raise CameraError("preview_start", "Invalid playback window.")
     settings = Settings.load(config)
     root = settings.data_root
     store = RecordingStore(root)
@@ -54,15 +57,23 @@ def prepare(config: Path, key: str):
     if not source or not item or item["device_id"] != settings.did:
         raise CameraError("recording_missing", "Download and verify the recording first.")
     if ready(root, key):
-        return {"id": key, "state": "ready", "already_present": True}
+        return {"id": key, "state": "ready", "already_present": True, "full": True, "start": 0}
+    if start is not None and ready(root, key, start):
+        _, manifest, _ = paths(root, key, start)
+        return {"id": key, "state": "ready", **read_private_json(manifest), "full": False}
     report("preparing_playback")
     protect(root, key)
     info = probe(source)
     duration = float(info.get("format", {}).get("duration", 0))
     if not math.isfinite(duration) or not 0 < duration <= 3600:
         raise CameraError("preview_duration", "Recording duration is unsupported for preview.")
+    source_duration = duration
+    if start is not None:
+        if start >= source_duration:
+            raise CameraError("preview_start", "Playback window is outside recording.")
+        duration = min(30.0, source_duration - start)
     reservation = math.ceil(duration * 200000 * 1.3) + 1024**2
-    target, manifest, temporary = paths(root, key)
+    target, manifest, temporary = paths(root, key, start)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     cleanup(
         root,
@@ -123,6 +134,10 @@ def prepare(config: Path, key: str):
         "1",
         str(temporary),
     ]
+    if start is not None:
+        position = command.index("-i")
+        command[position:position] = ["-ss", str(start)]
+        command[-1:-1] = ["-t", str(duration)]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     os.set_blocking(process.stdout.fileno(), False)
     started = time.monotonic()
@@ -188,13 +203,23 @@ def prepare(config: Path, key: str):
     temporary_manifest.unlink(missing_ok=True)
     write_private_json(
         temporary_manifest,
-        {"verified": True, "source_sha256": item["sha256"], "bytes": target.stat().st_size},
+        {
+            "verified": True,
+            "source_sha256": item["sha256"],
+            "bytes": target.stat().st_size,
+            "start": start or 0,
+            "seconds": duration,
+            "source_seconds": source_duration,
+        },
     )
     temporary_manifest.replace(manifest)
     return {
         "id": key,
         "state": "ready",
         "seconds": duration,
+        "start": start or 0,
+        "source_seconds": source_duration,
+        "full": start is None,
         "conversion_seconds": round(conversion_seconds, 3),
         "validation_seconds": round(time.monotonic() - validation_started, 3),
         "audio": any(s["codec_type"] == "audio" for s in result["streams"]),
