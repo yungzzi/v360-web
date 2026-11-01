@@ -122,6 +122,48 @@ class RecordingStore:
                 ),
             )
 
+    def timeline(self, day, did=None):
+        """Bounded device-local timeline; no camera or media processing is triggered."""
+        total, rows = self.library(day, 0, 10000, did)
+        clauses = ["substr(start_local,1,7)=?"]
+        parameters = [day.isoformat()[:7]]
+        if did is not None:
+            clauses.append("device_id=?")
+            parameters.append(did)
+        with self.connection() as db:
+            days = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT substr(start_local,1,10) AS day,count(*) AS count FROM recordings WHERE "
+                    + " AND ".join(clauses)
+                    + " GROUP BY day ORDER BY day",
+                    parameters,
+                )
+            ]
+        items = []
+        for row in reversed(rows):
+            start = datetime.fromisoformat(row["start_local"])
+            seconds = start.hour * 3600 + start.minute * 60 + start.second
+            duration = row["duration_raw"]
+            items.append(
+                {
+                    "id": row["id"],
+                    "start_local": row["start_local"],
+                    "second": seconds,
+                    # Device-declared seconds are approximate, never a continuity guarantee.
+                    "duration_hint": duration if 0 < duration <= 3600 else None,
+                    "state": row["state"],
+                    "original_ready": self.media_path(row["id"]) is not None,
+                }
+            )
+        return {
+            "day": day.isoformat(),
+            "days": days,
+            "items": items,
+            "total": total,
+            "truncated": total > len(items),
+        }
+
     def catalog(self, did, day):
         if not did or not day:
             return None
