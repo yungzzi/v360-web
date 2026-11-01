@@ -32,7 +32,7 @@ test('keyboard changes still seek independently',()=>{
  const q=setup();for(const n of [43201,43202]){q.elements['timeline-seek'].value=String(n);q.fire('input');q.fire('change');}assert.deepEqual(q.calls,[43201,43202]);
 });
 test('busy selection keeps latest intent and discards it on a different day',()=>{
- let calls=[],day='2026-11-01';const ctx={libraryBusy:true,pendingTimelineSeek:null,signedIn:true,selectTimelineTime(){},libraryMessage(){},recordingAction:(...args)=>calls.push(args),$:id=>id==='recording-day'?{value:day}:{hidden:false}};vm.createContext(ctx);
+ let calls=[],day='2026-11-01';const ctx={libraryBusy:true,pendingTimelineSeek:null,prefetchInfo:null,signedIn:true,selectTimelineTime(){},libraryMessage(){},recordingAction:(...args)=>calls.push(args),$:id=>id==='recording-day'?{value:day}:{hidden:false}};vm.createContext(ctx);
  vm.runInContext(source.slice(source.indexOf('function chooseTimeline('),source.indexOf('function seekTimeline(')),ctx);
  ctx.chooseTimeline({id:'one',second:1},0);ctx.chooseTimeline({id:'two',second:2},3);assert.equal(calls.length,0);ctx.libraryBusy=false;ctx.flushTimelineSeek();assert.equal(calls.length,1);assert.equal(calls[0][0].id,'two');
  ctx.libraryBusy=true;ctx.chooseTimeline({id:'three',second:3},0);day='2026-11-02';ctx.libraryBusy=false;ctx.flushTimelineSeek();assert.equal(calls.length,1);
