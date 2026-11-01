@@ -81,7 +81,7 @@ def test_browser_preview_media_session_range_and_logout(prepared):
         assert "HttpOnly" in response.headers["set-cookie"]
         assert "SameSite=strict" in response.headers["set-cookie"]
         assert client.get(route).content == content
-        assert client.get(route, headers={'Sec-Fetch-Site':'same-site'}).status_code == 403
+        assert client.get(route, headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
         response = client.get(route, headers={"Range": "bytes=0-31"})
         assert response.status_code == 206 and response.content == content[:32]
         # The media cookie cannot authorize camera operations or metadata.
@@ -165,3 +165,37 @@ def test_downloaded_file_validation_resumes_without_camera(prepared, monkeypatch
     monkeypatch.setattr(service, "CameraClient", forbidden)
     assert service.download(config, key)["rechecked_local_file"]
     assert store.get(key)["state"] == "verified"
+
+
+def test_timeline_uses_whole_day_not_list_page_and_hides_private_fields(prepared, monkeypatch):
+    root, store, key, config = prepared
+    for minute in range(20):
+        store.discover(
+            "MATE-test", 0, [RecordingEvent(datetime(2026, 10, 29, 13, minute), 0, 2, 1, 15)]
+        )
+    store.discover("MATE-test", 0, [RecordingEvent(datetime(2026, 10, 30, 0), 0, 2, 1, -1)])
+    store.discover("MATE-other", 0, [RecordingEvent(datetime(2026, 10, 29, 14), 0, 2, 1, 30)])
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Timeline must not connect to the camera or process media")
+
+    monkeypatch.setattr(service, "CameraClient", forbidden)
+    with TestClient(create_app(root, TOKEN, config)) as client:
+        assert client.get("/api/library/timeline?day=2026-10-29").status_code == 401
+        assert client.get("/api/library/timeline?day=bad", headers=HEADERS).status_code == 422
+        value = client.get("/api/library/timeline?day=2026-10-29", headers=HEADERS).json()
+        assert value["total"] == 21 and len(value["items"]) == 21
+        assert not value["truncated"]
+        assert value["days"] == [
+            {"day": "2026-10-29", "count": 21},
+            {"day": "2026-10-30", "count": 1},
+        ]
+        assert value["items"][0]["id"] == key and value["items"][0]["original_ready"]
+        assert value["items"][0]["second"] == 43200
+        assert value["items"][-1]["duration_hint"] == 15
+        for item in value["items"]:
+            assert not {"device_id", "path", "sha256"} & item.keys()
+        other_day = client.get("/api/library/timeline?day=2026-10-30", headers=HEADERS).json()
+        assert other_day["items"][0]["duration_hint"] is None
+        empty = client.get("/api/library/timeline?day=2026-11-01", headers=HEADERS).json()
+        assert empty["total"] == 0 and empty["days"] == []

@@ -472,6 +472,22 @@ def create_app(
             "catalog": store.catalog(did, day),
         }
 
+    @app.get("/api/library/timeline", dependencies=[Depends(authorize)])
+    def library_timeline(day: date):
+        did = None
+        if config_path:
+            try:
+                did = Settings.load(config_path).did
+            except CameraError as error:
+                raise HTTPException(503, "Camera profile unavailable") from error
+        value = store.timeline(day, did)
+        for item in value["items"]:
+            item["playback_ready"] = (
+                item["original_ready"] and playback.ready(root, item["id"]) is not None
+            )
+        value["catalog"] = store.catalog(did, day)
+        return value
+
     @app.get("/api/recordings/{key}/file", dependencies=[Depends(authorize_media)])
     def recording_file(key: str):
         maintenance.protect(root, key)
