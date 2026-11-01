@@ -92,7 +92,7 @@ def cleanup(root, additional=0, kind="archive", protected=None):
             key = row["id"]
             if key == protected or store.leased(key) or active(root, key):
                 continue
-            for suffix in (".mp4", ".json"):
+            for suffix in preview_suffixes(root, key):
                 path = owned(root, "previews", key, suffix)
                 if path and path.is_file():
                     size = path.stat().st_size
@@ -141,10 +141,20 @@ def cleanup(root, additional=0, kind="archive", protected=None):
             used -= size
             store.update(row["id"], "evicted", path=None, error=None)
             removed.append(row["id"])
-            for suffix in (".mp4", ".json"):
+            for suffix in preview_suffixes(root, row["id"]):
                 preview = owned(root, "previews", row["id"], suffix)
                 if preview:
                     preview.unlink(missing_ok=True)
         with store.connection() as db:
             db.execute("DELETE FROM media_leases WHERE until < ?", (time.time(),))
         return {"removed_recordings": len(removed), "removed_cache_bytes": removed_cache}
+
+
+def preview_suffixes(root, key):
+    """Only owned, bounded window names share the parent recording lease/quota."""
+    yield ".mp4"
+    yield ".json"
+    for path in (root / "previews").glob(key + ".s*"):
+        suffix = path.name[len(key) :]
+        if re.fullmatch(r"\.s[0-9]{4}\.(mp4|json|partial\.mp4)", suffix):
+            yield suffix

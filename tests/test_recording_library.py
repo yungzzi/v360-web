@@ -224,3 +224,66 @@ def test_playback_progress_tolerates_invalid_output(value):
 def test_playback_progress_time_is_monotonic():
     assert playback.parse_progress_time("00:01:03.250000") == 63.25
     assert playback.parse_progress_time("00:00:01", 2.0) == 2.0
+
+
+def test_window_preview_is_separate_and_requires_media_auth(prepared):
+    root, _store, key, config = prepared
+    result = playback.prepare(config, key, 0)
+    assert not result["full"] and result["start"] == 0
+    assert playback.ready(root, key) is None
+    assert playback.ready(root, key, 0) is not None
+    with TestClient(create_app(root, TOKEN, config)) as client:
+        route = f"/api/recordings/{key}/window?start=0"
+        assert client.get(route).status_code == 401
+        assert client.get(route, headers=HEADERS).status_code == 200
+        assert client.get(route.replace("start=0", "start=1"), headers=HEADERS).status_code == 422
+        assert client.get(route.replace("start=0", "start=30"), headers=HEADERS).status_code == 404
+    assert playback.prepare(config, key, 0)["seconds"] == result["seconds"]
+    with pytest.raises(CameraError):
+        playback.prepare(config, key, 30)
+
+
+def test_long_recording_window_seek_tail_and_cache_cleanup(prepared, tmp_path, monkeypatch):
+    import subprocess
+
+    from v360_web import maintenance
+    from v360_web.media import find_tool, probe
+
+    root, store, key, config = prepared
+    source = store.media_path(key)
+    long_file = tmp_path / "long.mp4"
+    subprocess.run(
+        [
+            find_tool("ffmpeg"),
+            "-v",
+            "error",
+            "-stream_loop",
+            "64",
+            "-i",
+            str(source),
+            "-c",
+            "copy",
+            str(long_file),
+        ],
+        check=True,
+        timeout=30,
+    )
+    source.write_bytes(long_file.read_bytes())
+    store.update(
+        key,
+        "verified",
+        bytes=source.stat().st_size,
+        sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+    middle = playback.prepare(config, key, 30)
+    tail = playback.prepare(config, key, 60)
+    assert middle["start"] == 30 and middle["seconds"] == 30
+    assert tail["start"] == 60 and abs(tail["seconds"] - 5) < 0.25
+    assert abs(float(probe(playback.ready(root, key, 30))["format"]["duration"]) - 30) < 0.25
+    assert playback.ready(root, key) is None
+    store.lease(key, -1)
+    monkeypatch.setattr(storage, "CACHE_LIMIT", 1)
+    maintenance.cleanup(root, kind="cache")
+    assert playback.ready(root, key, 30) is None
+    assert playback.ready(root, key, 60) is None
+    assert store.media_path(key) == source
