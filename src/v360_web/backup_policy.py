@@ -10,13 +10,13 @@ PROFILES = {
         "daily_bytes": 16 * 1024**2,
     },
     "server": {
-        "archive_limit": 10 * 1024**3,
+        "archive_limit": 15 * 1024**3,
         "batch_files": 10,
         "batch_bytes": 64 * 1024**2,
-        "daily_bytes": 512 * 1024**2,
+        "daily_bytes": None,
     },
 }
-DEFAULT = {"enabled": True, "mode": "local", "interval_minutes": 60, "retention_days": 30}
+DEFAULT = {"enabled": True, "mode": "local", "interval_minutes": 30, "retention_days": 30}
 
 
 class BackupPolicy(RecordingStore):
@@ -38,4 +38,8 @@ class BackupPolicy(RecordingStore):
 
     def policy(self):
         value = {**DEFAULT, **self.read("policy", {})}
-        return {**value, **PROFILES[value["mode"]]}
+        return {
+            **value,
+            **PROFILES[value["mode"]],
+            **({"interval_minutes": 30} if value["mode"] == "server" else {}),
+        }

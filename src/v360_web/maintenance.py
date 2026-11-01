@@ -71,6 +71,8 @@ def cleanup(root, additional=0, kind="archive", protected=None):
         if policy.get("requires_profile"):
             raise CameraError("storage_profile", "Choose a storage profile before cleanup.")
         rows = sorted(store.list(), key=lambda r: r["saved_at"] or r["updated_at"])
+        if policy["mode"] == "server":
+            return cleanup_combined(root, store, rows, policy, additional, protected)
         limit = min(storage.ARCHIVE_LIMIT, policy["archive_limit"])
         if additional > (limit if kind == "archive" else storage.CACHE_LIMIT):
             raise CameraError("storage_limit", "Incoming file exceeds the storage budget.")
@@ -158,3 +160,57 @@ def preview_suffixes(root, key):
         suffix = path.name[len(key) :]
         if re.fullmatch(r"\.s[0-9]{4}\.(mp4|json|partial\.mp4)", suffix):
             yield suffix
+
+
+def cleanup_combined(root, store, rows, policy, additional, protected):
+    """Server originals and web files are one retained unit under one total budget."""
+    rows = sorted(rows, key=lambda row: row["start_local"])
+    limit = storage.SERVER_TOTAL_LIMIT
+    if additional > limit:
+        raise CameraError("storage_limit", "Incoming file exceeds combined budget.")
+    used = sum(storage.usage(root / folder) for folder in ("media", "previews", "live"))
+    required = max(
+        0,
+        used + additional - limit,
+        storage.FREE_RESERVE + additional - storage.shutil.disk_usage(root).free,
+    )
+    eligible = []
+    for row in rows:
+        key = row["id"]
+        original = owned(root, "media", key, ".media")
+        if (
+            key == protected
+            or row["pinned"]
+            or store.leased(key)
+            or active(root, key)
+            or row["state"] != "verified"
+            or not row["saved_at"]
+            or original is None
+            or not row["path"]
+            or (root / row["path"]).resolve() != original.resolve()
+        ):
+            continue
+        files = [original]
+        files += [
+            p
+            for suffix in preview_suffixes(root, key)
+            if (p := owned(root, "previews", key, suffix)) is not None
+        ]
+        sizes = [(p, p.stat().st_size) for p in files if p.is_file()]
+        eligible.append((row, sizes, sum(size for _, size in sizes)))
+    if required > sum(size for _, _, size in eligible):
+        raise CameraError("storage_limit", "Protected or unmanaged files prevent safe cleanup.")
+    cutoff = (datetime.now(UTC) - timedelta(days=policy["retention_days"])).isoformat()
+    removed, cache_bytes = [], 0
+    for row, files, size in eligible:
+        if required <= 0 and row["saved_at"] >= cutoff:
+            continue
+        for path, count in files:
+            path.unlink(missing_ok=True)
+            if path.parent.name == "previews":
+                cache_bytes += count
+        store.update(row["id"], "evicted", path=None, error=None)
+        removed.append(row["id"])
+        required -= size
+    storage.check_free(root, additional)
+    return {"removed_recordings": len(removed), "removed_cache_bytes": cache_bytes}

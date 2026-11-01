@@ -209,7 +209,7 @@ def test_backup_api_requires_auth_and_persists_policy(tmp_path, monkeypatch):
         assert client.put("/api/backup", json={}).status_code == 401
         body = {"enabled": False, "mode": "server", "interval_minutes": 60}
         value = client.put("/api/backup", headers=HEADERS, json=body).json()
-        assert value["policy"]["archive_limit"] == 10 * 1024**3
+        assert value["policy"]["archive_limit"] == 15 * 1024**3
         assert client.post("/api/backup/run", headers=HEADERS).status_code == 409
         assert (
             client.put("/api/backup", headers=HEADERS, json={**body, "mode": "bad"}).status_code
@@ -305,6 +305,9 @@ def test_new_queue_precedes_history_and_summary_counts(tmp_path, monkeypatch):
     backup.cycle()
     assert len(queries) == 1
     assert backup.snapshot()["archive"] == {
+        "ready": 0,
+        "oldest_ready": None,
+        "ready_span_days": 0,
         "saved": 1,
         "saved_bytes": 99,
         "pending": 11,
@@ -361,7 +364,7 @@ def test_history_failure_does_not_block_known_downloads(tmp_path, monkeypatch):
     assert backup.snapshot()["error"] is None
 
 
-def test_backlog_continues_early_without_increasing_daily_budget(tmp_path, monkeypatch):
+def test_backlog_waits_half_hour_without_daily_budget(tmp_path, monkeypatch):
     backup = manager(tmp_path, monkeypatch)
     policy(tmp_path, mode="server")
     for i in range(11):
@@ -375,6 +378,71 @@ def test_backlog_continues_early_without_increasing_daily_budget(tmp_path, monke
     backup.cycle()
     state = backup.snapshot()
     assert state["archive"]["pending"] == 1
-    assert 590 < state["next_run"] - time.time() <= 600
-    assert state["policy"]["daily_bytes"] == 512 * 1024**2
+    assert 1790 < state["next_run"] - time.time() <= 1800
+    assert state["policy"]["daily_bytes"] is None
     assert backup.db.read("daily")["bytes"] == 1000
+
+
+def test_server_prepares_saved_recordings_without_downloading_them(tmp_path, monkeypatch):
+    from v360_web import playback
+
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    key, _ = record(tmp_path)
+    prepared = []
+    monkeypatch.setattr(playback, "ready", lambda *args: None)
+    monkeypatch.setattr(playback, "prepare", lambda config, key: prepared.append(key))
+    monkeypatch.setattr(
+        service,
+        "download",
+        lambda *args: pytest.fail("Saved original must not be downloaded again"),
+    )
+    backup.db.write(
+        "daily",
+        {"day": datetime.now(ZoneInfo("Asia/Hong_Kong")).date().isoformat(), "bytes": 1024**4},
+    )
+    backup.cycle()
+    assert prepared == [key]
+    assert backup.snapshot()["last_prepared"] == 1
+    assert backup.snapshot()["state"] == "waiting"
+
+
+def test_combined_server_budget_removes_old_pair_and_preserves_pins(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "SERVER_TOTAL_LIMIT", 100)
+    old, old_path = record(tmp_path, 30)
+    pin, pin_path = record(tmp_path, 20)
+    recent, recent_path = record(tmp_path, 10)
+    policy(tmp_path, mode="server")
+    store = RecordingStore(tmp_path)
+    store.pin(pin, True)
+    previews = tmp_path / "previews"
+    previews.mkdir()
+    for key in [old, pin, recent]:
+        (previews / (key + ".mp4")).write_bytes(b"x" * 10)
+    value = maintenance.cleanup(tmp_path, kind="cache")
+    assert value["removed_recordings"] == 1
+    assert not old_path.exists() and not (previews / (old + ".mp4")).exists()
+    assert pin_path.exists() and recent_path.exists()
+    assert storage.summary(tmp_path)["combined_bytes"] == 80
+    with pytest.raises(CameraError):
+        storage.admit(tmp_path, 21, "cache")
+    assert pin_path.exists() and recent_path.exists()
+
+
+def test_server_preparation_failures_are_bounded_per_cycle(tmp_path, monkeypatch):
+    from v360_web import playback
+
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    for i in range(15):
+        record(tmp_path, i)
+    calls = []
+    monkeypatch.setattr(playback, "ready", lambda *args: None)
+
+    def fail(config, key):
+        calls.append(key)
+        raise CameraError("preview_failed", "fixture")
+
+    monkeypatch.setattr(playback, "prepare", fail)
+    backup.cycle()
+    assert len(calls) == 10
