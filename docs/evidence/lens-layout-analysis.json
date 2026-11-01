@@ -1,0 +1,25 @@
+{
+  "source_apk_sha256": "f7f05455d9c6e881eb9584b0b6eaeba5f99feef381a3d27415d6051f6e5c43e0",
+  "device_type": "29",
+  "app_mode": "FakeThree",
+  "profile": "dual-three",
+  "primary_channel": 2,
+  "auxiliary_channel": 5,
+  "native_library_sha256": "b23b3f9547cb3fa0ece65a5f0831a8ba462d7771384d577beb86c87ac3946ff9",
+  "native_region_function": "screenshot::getRenderRegion(int)",
+  "native_render_modes": {
+    "1": [
+      0.0,
+      0.20000000298023224,
+      0.6000000238418579,
+      0.800000011920929
+    ],
+    "2": [
+      0.4000000059604645,
+      0.20000000298023224,
+      1.0,
+      0.800000011920929
+    ]
+  },
+  "scope": "Static APK and exported native function analysis, corroborated by two received video channels; no third independent channel assumed."
+}

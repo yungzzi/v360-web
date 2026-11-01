@@ -34,6 +34,7 @@ from .backup import BackupManager
 from .config import Settings
 from .errors import CameraError
 from .jobs import JobStore
+from .lenses import views
 from .sessions import COOKIE, REMEMBER_SECONDS, SessionStore
 from .store import RecordingStore
 from .streaming import StreamManager
@@ -297,11 +298,13 @@ def create_app(
         configured = False
         battery_status = {"percent": None, "charging": None, "updated_at": None, "stale": True}
         transport = "not_configured"
+        available_views = views(None)
         if config_path:
             try:
                 settings = Settings.load(config_path)
                 configured = True
                 transport = settings.bridge_kind
+                available_views = views(settings)
                 battery_status = battery.cached(settings)
             except CameraError:
                 pass
@@ -312,6 +315,7 @@ def create_app(
             "hardware_acceptance": "not_recorded",
             "background_jobs": "persisted; interrupted jobs require retry",
             "live": streams.snapshot(),
+            "lenses": available_views,
             "battery": battery_status,
             "local_shutdown_available": local_controls(request),
             "backup": backup.snapshot(),
@@ -345,7 +349,11 @@ def create_app(
             raw = await asyncio.wait_for(socket.receive_text(), timeout=5)
             if len(raw) > 4096:
                 raise ValueError
-            supplied = json.loads(raw).get("token", "")
+            message = json.loads(raw)
+            supplied = message.get("token", "")
+            lens = message.get("lens", 0)
+            if type(lens) is not int or lens not in (0, 1, 2):
+                raise ValueError
             browser_session = socket.cookies.get(COOKIE, "")
             cookie_auth = not valid_token(supplied)
             if cookie_auth and (origin is None or not sessions.valid(browser_session)):
@@ -353,14 +361,18 @@ def create_app(
                 return
             for attempt in range(175):
                 try:
-                    viewer = streams.subscribe()
+                    viewer = streams.subscribe(lens)
                     break
                 except CameraError as error:
-                    if error.code != "camera_busy" or not backup.running or attempt == 174:
+                    if error.code == "lens_busy" and attempt < 10:
+                        await asyncio.sleep(0.2)
+                        continue
+                    waiting = backup.running or streams.snapshot()["state"] == "stopping"
+                    if error.code != "camera_busy" or not waiting or attempt == 174:
                         raise
                     await asyncio.sleep(0.2)
             await socket.send_json(
-                {"type": "state", "state": "starting", "viewer_id": viewer.identity}
+                {"type": "state", "state": "starting", "viewer_id": viewer.identity, "lens": lens}
             )
 
             async def send_frames():
@@ -379,7 +391,12 @@ def create_app(
                         mime, data = value
                         await asyncio.wait_for(
                             socket.send_json(
-                                {"type": "init", "mime": mime, "audio": "mp4a.40.2" in mime}
+                                {
+                                    "type": "init",
+                                    "mime": mime,
+                                    "audio": "mp4a.40.2" in mime,
+                                    "ptz": lens == 0,
+                                }
                             ),
                             5,
                         )

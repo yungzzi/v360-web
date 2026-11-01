@@ -1,0 +1,68 @@
+{
+  "captures": [
+    {
+      "lens": 0,
+      "streams": [
+        {
+          "codec_type": "video",
+          "codec_name": "h264",
+          "width": 640,
+          "height": 360,
+          "duration": "4.064063"
+        },
+        {
+          "codec_type": "audio",
+          "codec_name": "aac",
+          "width": null,
+          "height": null,
+          "duration": "4.096000"
+        }
+      ]
+    },
+    {
+      "lens": 1,
+      "streams": [
+        {
+          "codec_type": "video",
+          "codec_name": "h264",
+          "width": 640,
+          "height": 360,
+          "duration": "4.000000"
+        }
+      ]
+    },
+    {
+      "lens": 2,
+      "streams": [
+        {
+          "codec_type": "video",
+          "codec_name": "h264",
+          "width": 640,
+          "height": 360,
+          "duration": "4.000000"
+        }
+      ]
+    }
+  ],
+  "final_state": {
+    "state": "stopped",
+    "lens": 2,
+    "viewers": 0,
+    "error": null,
+    "frames": 468,
+    "fragments": 31,
+    "audio": false,
+    "audio_frames": 0,
+    "session_limit_seconds": 1800,
+    "control_error": null,
+    "ptz_active": false
+  },
+  "browser_ready_states": [
+    4,
+    4,
+    4
+  ],
+  "different_view_conflict_preserved_existing_view": true,
+  "scope": "local camera, desktop browser; cloud acceptance pending",
+  "physical_phone_acceptance": false
+}

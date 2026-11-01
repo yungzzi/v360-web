@@ -55,11 +55,14 @@ class Settings:
     command_channel: int = 0
     download_channel: int = 4
     live_channel: int = 2
+    live_layout: str = "single"
     request_timeout: float = 15
     transfer_timeout: float = 120
     allow_invalid_record_dates: bool = False
 
     def __post_init__(self):
+        if self.live_layout not in ("single", "dual-three"):
+            raise CameraError("config_range", "Unsupported live view layout.")
         if not isinstance(self.allow_invalid_record_dates, bool):
             raise CameraError("config_range", "Recording metadata policy must be a boolean.")
         numeric_fields = [
@@ -128,6 +131,7 @@ class Settings:
             command_channel=int(channels.get("command", 0)),
             download_channel=int(channels.get("download", 4)),
             live_channel=int(channels.get("live", 2)),
+            live_layout=channels.get("layout", "single"),
             request_timeout=float(cfg.get("request_timeout", 15)),
             transfer_timeout=float(cfg.get("transfer_timeout", 120)),
             allow_invalid_record_dates=cfg.get("allow_invalid_record_dates", False),

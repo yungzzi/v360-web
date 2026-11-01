@@ -107,7 +107,7 @@ def test_cookie_websocket_and_logout_releases_viewer(tmp_path, monkeypatch):
     app = create_app(tmp_path, TOKEN)
     viewer = SimpleNamespace(identity="test", closed=threading.Event(), messages=queue.Queue())
     unsubscribed = threading.Event()
-    monkeypatch.setattr(app.state.streams, "subscribe", lambda: viewer)
+    monkeypatch.setattr(app.state.streams, "subscribe", lambda lens=0: viewer)
     monkeypatch.setattr(app.state.streams, "unsubscribe", lambda v: unsubscribed.set())
     with TestClient(app) as client:
         login(client)
