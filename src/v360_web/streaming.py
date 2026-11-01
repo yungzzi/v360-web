@@ -18,6 +18,7 @@ from .client import CameraClient
 from .config import Settings
 from .controls import CameraControls
 from .errors import CameraError
+from .lenses import crop_filter, source_view
 from .media import find_tool
 
 MAX_BOX = 2 * 1024**2
@@ -28,10 +29,12 @@ MAX_VIEWERS = 3
 class LivePacket:
     kind: str
     data: bytes
+    crop: str | None = None
 
 
-def camera_frames(config: Path, stop: threading.Event, controls=None):
+def camera_frames(config: Path, stop: threading.Event, controls=None, lens=0):
     settings = Settings.load(config)
+    channel, crop = source_view(settings, lens)
     client = CameraClient(settings)
     client.bridge.timeout = min(client.bridge.timeout, 10)
     with client as camera:
@@ -39,23 +42,24 @@ def camera_frames(config: Path, stop: threading.Event, controls=None):
         keep = time.monotonic()
         first_video = None
         pending, pending_bytes = [], 0
-        audio_mode = None
+        audio_mode = None if lens == 0 else False
         try:
             camera.send(
                 wire.LIVE_START, wire.live_payload(2, 0 if settings.shared else settings.user_id)
             )
-            camera.send(wire.AUDIO_START, struct.pack("<I", 0))
+            if lens == 0:
+                camera.send(wire.AUDIO_START, struct.pack("<I", 0))
+            else:
+                yield LivePacket("config", b"", crop=crop)
             if controls:
                 controls.attach(camera)
             while not stop.is_set():
                 deadline = time.monotonic() + 5
                 header = wire.parse_live_header(
-                    camera.bridge.read_exact(camera.session, settings.live_channel, 32, deadline)
+                    camera.bridge.read_exact(camera.session, channel, 32, deadline)
                 )
                 data = (
-                    camera.bridge.read_exact(
-                        camera.session, settings.live_channel, header.size, deadline
-                    )
+                    camera.bridge.read_exact(camera.session, channel, header.size, deadline)
                     if header.size
                     else b""
                 )
@@ -119,7 +123,8 @@ def camera_frames(config: Path, stop: threading.Event, controls=None):
             if controls:
                 controls.close()
             try:
-                camera.send(wire.AUDIO_STOP, struct.pack("<I", 0))
+                if lens == 0:
+                    camera.send(wire.AUDIO_STOP, struct.pack("<I", 0))
             except (CameraError, OSError):
                 pass
             try:
@@ -128,7 +133,7 @@ def camera_frames(config: Path, stop: threading.Event, controls=None):
                 pass
 
 
-def encoder_command(audio_fd=None):
+def encoder_command(audio_fd=None, crop=None):
     executable = find_tool("ffmpeg")
     if not executable:
         raise CameraError("ffmpeg_missing", "FFmpeg is required for browser playback.")
@@ -180,6 +185,8 @@ def encoder_command(audio_fd=None):
         ]
     else:
         command += ["-map", "0:v:0", "-an"]
+    if crop is not None:
+        command += ["-vf", crop_filter(crop)]
     return command + [
         "-c:v",
         "libx264",
@@ -283,6 +290,7 @@ class StreamManager:
         self, config: Path | None, camera_lock, source_factory=camera_frames, before_subscribe=None
     ):
         self.config = config
+        self.lens = 0
         self.camera_lock = camera_lock
         self.source_factory = source_factory
         self.guard = threading.Lock()
@@ -302,6 +310,7 @@ class StreamManager:
         with self.guard:
             return {
                 "state": self.state,
+                "lens": self.lens,
                 "viewers": len(self.viewers),
                 "error": self.error,
                 "frames": self.frames,
@@ -313,7 +322,9 @@ class StreamManager:
                 "ptz_active": bool(self.controls.sent),
             }
 
-    def subscribe(self):
+    def subscribe(self, lens=0):
+        if type(lens) is not int or lens not in (0, 1, 2):
+            raise CameraError("lens_unavailable", "Unknown view.")
         if self.before_subscribe:
             self.before_subscribe()
         with self.guard:
@@ -324,9 +335,12 @@ class StreamManager:
             active = self.thread is not None and self.thread.is_alive()
             if active and self.stop.is_set():
                 raise CameraError("camera_busy", "Previous live session is stopping.")
+            if active and lens != self.lens:
+                raise CameraError("lens_busy", "Another window is watching a different view.")
             if not active:
                 if not self.camera_lock.acquire(blocking=False):
                     raise CameraError("camera_busy", "A camera operation is already running.")
+                self.lens = lens
                 self.stop.clear()
                 self.initialization = None
                 self.state, self.error = "starting", None
@@ -347,9 +361,15 @@ class StreamManager:
             viewer.closed.set()
             if not self.viewers:
                 self.stop.set()
+                if self.thread and self.thread.is_alive():
+                    self.state = "stopping"
 
     def move(self, identity, direction):
         with self.guard:
+            if self.lens != 0 and direction:
+                raise CameraError(
+                    "lens_controls", "Direction controls are only enabled for the primary view."
+                )
             if not any(v.identity == identity and not v.closed.is_set() for v in self.viewers):
                 raise CameraError("viewer_missing", "Start watching before moving the camera.")
             self.controls.request_move(identity, direction)
@@ -414,10 +434,11 @@ class StreamManager:
         audio_read = audio_write = None
         feeders, inputs = [], {}
         audio = False
+        crop = None
         started = time.monotonic()
         try:
             source = (
-                camera_frames(self.config, self.stop, self.controls)
+                camera_frames(self.config, self.stop, self.controls, lens=self.lens)
                 if self.source_factory is camera_frames
                 else self.source_factory(self.config, self.stop)
             )
@@ -430,6 +451,7 @@ class StreamManager:
                 if isinstance(item, LivePacket):
                     if item.kind == "config":
                         audio = item.data == b"alaw"
+                        crop = item.crop
                         continue
                     kind, data = item.kind, item.data
                 else:
@@ -438,7 +460,13 @@ class StreamManager:
                     if audio:
                         audio_read, audio_write = os.pipe()
                     process = subprocess.Popen(
-                        encoder_command(audio_read) if audio else encoder_command(),
+                        (
+                            encoder_command(crop=crop)
+                            if crop is not None
+                            else encoder_command(audio_read)
+                            if audio
+                            else encoder_command()
+                        ),
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL,

@@ -6,14 +6,15 @@ const appFetch = (path, options) => fetch(appUrl(path), options);
 let signedIn = false, socket = null, media = null, source = null, objectURL = null;
 let chunks = [], mime = null, playing = false, requestGeneration = 0, serviceStopped = false;
 let viewerId=null;
+let lensViews=[{id:0,name:"主镜头",ptz:true}],lensListKey="";
 const ptzButtons=()=>document.querySelectorAll('[data-direction]');
 const labels = {starting:"正在连接",live:"正在观看",stopped:"已停止",failed:"连接失败"};
-const errors = {live_audio_format:'声音格式发生变化，请重新连接。',live_audio_sequence:'声音传输中断，请重新连接。',camera_busy:"摄像头正在处理其他任务，请稍后重试。",viewer_limit:"观看人数已达上限。",session_limit:"本次观看已达 30 分钟，请重新连接。",read_timeout:"摄像头暂时没有返回画面，请重新连接。",sdk_connect:"摄像头连接失败，请稍后重试。",live_sequence:"视频传输中断，请重新连接。"};
+const errors = {lens_busy:"另一个窗口正在观看不同镜头，请先停止那个窗口，再切换。",lens_unavailable:"此镜头尚未配置，请刷新页面。",live_audio_format:'声音格式发生变化，请重新连接。',live_audio_sequence:'声音传输中断，请重新连接。',camera_busy:"摄像头正在处理其他任务，请稍后重试。",viewer_limit:"观看人数已达上限。",session_limit:"本次观看已达 30 分钟，请重新连接。",read_timeout:"摄像头暂时没有返回画面，请重新连接。",sdk_connect:"摄像头连接失败，请稍后重试。",live_sequence:"视频传输中断，请重新连接。"};
 function status(text) {$('notice').textContent=text;}
 function resetPlayer(message="已停止观看。") {
   if(viewerId&&signedIn)sendMove('stop');viewerId=null;ptzButtons().forEach(b=>b.disabled=true);requestGeneration++; playing=false;
   if(socket){const previous=socket;socket=null;previous.close();}
-  $('video').pause();$('video').muted=true;$('sound').disabled=true;$('sound').textContent='开启声音';$('sound').setAttribute('aria-pressed','false');$('audio-state').textContent='连接后可开启声音';$('video').removeAttribute('src');$('video').load();
+  $('video').pause();$('video').muted=true;$('sound').disabled=true;$('sound').textContent='开启声音';$('sound').setAttribute('aria-pressed','false');$('audio-state').textContent=Number($('lens').value)===0?'连接后可开启声音':'此镜头仅提供画面';$('video').removeAttribute('src');$('video').load();
   if(objectURL)URL.revokeObjectURL(objectURL);
   objectURL=null;media=source=null;chunks=[];mime=null;
   $('start').disabled=false;$('stop').disabled=true;$('empty').hidden=false;
@@ -41,7 +42,7 @@ function prepare(){
 }
 async function poll(){
   if(!signedIn || serviceStopped)return;
-  try{const response=await appFetch('/api/status',{});if(response.status===401){showLogin();return;}if(!response.ok)return;const state=await response.json();$('viewers').textContent=state.live.viewers+' 人';renderBackup(state.backup);const b=state.battery||{};const pct=b.percent;const fill=$('battery-fill');fill.style.width=pct==null?'0%':Math.max(0,Math.min(100,pct))+'%';$('battery-percent').textContent=pct==null?'—':pct+'%';$('battery-badge').classList.toggle('low',pct!=null&&pct<=20);$('battery-badge').classList.toggle('stale',!!b.stale);$('battery-charge').hidden=b.charging!==true;const batteryLabel=pct==null?'尚未取得电量':'电量 '+pct+'%'+(b.updated_at?'，读取于 '+new Date(b.updated_at*1000).toLocaleString():'');$('battery-badge').setAttribute('aria-label',batteryLabel);$('battery-badge').title=batteryLabel;$('battery').textContent=b.percent==null?'未知':b.percent+'%';$('charging').textContent=b.charging==null?'未知':b.charging?'设备报告充电中':'未报告外接充电';$('battery-time').textContent=b.updated_at?new Date(b.updated_at*1000).toLocaleString()+(b.stale?' · 待读取更新':' · 最近读取'):'尚未读取电量';$('local-controls').hidden=!state.local_shutdown_available;}
+  try{const response=await appFetch('/api/status',{});if(response.status===401){showLogin();return;}if(!response.ok)return;const state=await response.json();renderLenses(state.lenses);$('viewers').textContent=state.live.viewers+' 人';renderBackup(state.backup);const b=state.battery||{};const pct=b.percent;const fill=$('battery-fill');fill.style.width=pct==null?'0%':Math.max(0,Math.min(100,pct))+'%';$('battery-percent').textContent=pct==null?'—':pct+'%';$('battery-badge').classList.toggle('low',pct!=null&&pct<=20);$('battery-badge').classList.toggle('stale',!!b.stale);$('battery-charge').hidden=b.charging!==true;const batteryLabel=pct==null?'尚未取得电量':'电量 '+pct+'%'+(b.updated_at?'，读取于 '+new Date(b.updated_at*1000).toLocaleString():'');$('battery-badge').setAttribute('aria-label',batteryLabel);$('battery-badge').title=batteryLabel;$('battery').textContent=b.percent==null?'未知':b.percent+'%';$('charging').textContent=b.charging==null?'未知':b.charging?'设备报告充电中':'未报告外接充电';$('battery-time').textContent=b.updated_at?new Date(b.updated_at*1000).toLocaleString()+(b.stale?' · 待读取更新':' · 最近读取'):'尚未读取电量';$('local-controls').hidden=!state.local_shutdown_available;}
   catch{/* Keep the active player's error reporting independent of status polling. */}
 }
 function showLogin(){clearReplay();resetPlayer();signedIn=false;$('login').hidden=false;$('dashboard').hidden=true;$('logout').hidden=true;$('token').value='';}
@@ -65,13 +66,13 @@ $('start').addEventListener('click',()=>{
   $('start').disabled=true;$('stop').disabled=false;$('connection').textContent='连接中';$('state').textContent='正在连接';
   media=new MediaSource();objectURL=URL.createObjectURL(media);$('video').src=objectURL;media.addEventListener('sourceopen',prepare);
   const ws=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+appUrl('/api/live/ws'));socket=ws;ws.binaryType='arraybuffer';
-  ws.onopen=()=>{if(socket===ws)ws.send(JSON.stringify({}));};
+  ws.onopen=()=>{if(socket===ws)ws.send(JSON.stringify({lens:Number($('lens').value)}));};
   ws.onmessage=event=>{
     if(socket!==ws || generation!==requestGeneration)return;
     if(typeof event.data==='string'){
       const data=JSON.parse(event.data);
       if(data.type==='state'){viewerId=data.viewer_id;}
-      else if(data.type==='init'){mime=data.mime;prepare();$('sound').disabled=!data.audio;$('audio-state').textContent=data.audio?'声音可用 · 默认静音':'本次连接暂无声音';ptzButtons().forEach(b=>b.disabled=false);}
+      else if(data.type==='init'){mime=data.mime;prepare();$('sound').disabled=!data.audio;$('audio-state').textContent=data.audio?'声音可用 · 默认静音':Number($('lens').value)===0?'本次连接暂无声音':'此镜头仅提供画面';ptzButtons().forEach(b=>b.disabled=!data.ptz);}
       else if(data.type==='error' || data.type==='ended')fail(errors[data.error] || '直播连接已结束，可重新开始观看。');
     }else{if(chunks.length>=8){fail('网络或浏览器播放过慢，请重新连接。');return;}chunks.push(event.data);pump();}
   };
@@ -144,3 +145,12 @@ restoreLogin();
 
 $('sound').addEventListener('click',()=>{const v=$('video');v.muted=!v.muted;if(!v.muted&&v.volume===0)v.volume=1;v.play().catch(()=>status('请点击播放器播放按钮后重试。'));});
 $('video').addEventListener('volumechange',()=>{if($('sound').disabled)return;const audible=!$('video').muted&&$('video').volume>0;$('sound').textContent=audible?'静音':'开启声音';$('sound').setAttribute('aria-pressed',String(audible));$('audio-state').textContent=audible?'声音已开启':'声音已静音';});
+
+function renderLenses(value){
+  if(!value)return;const key=JSON.stringify(value);if(key===lensListKey)return;lensListKey=key;lensViews=value;
+  const select=$('lens'),current=Number(select.value);select.replaceChildren();
+  for(const view of value){const option=document.createElement('option');option.value=view.id;option.textContent=view.name;select.append(option);}
+  select.value=String(value.some(v=>v.id===current)?current:0);$('lens-switch').hidden=value.length<2;describeLens();
+}
+function describeLens(){const view=lensViews.find(v=>v.id===Number($('lens').value))||lensViews[0];$('camera-title').textContent=view.id===0?'家中摄像头':view.name;$('lens-note').textContent=view.ptz?'主镜头支持实时观看、方向控制和录像回放。':'此镜头仅支持实时观看；历史录像来自主镜头。';$('ptz-note').textContent=view.ptz?'开始观看后可用，每次点按短暂转动。':'请切换到主镜头调整方向。';}
+$('lens').addEventListener('change',()=>{const resume=playing;describeLens();resetPlayer('已切换镜头。');if(resume)$('start').click();});

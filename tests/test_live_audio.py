@@ -33,13 +33,14 @@ def audio(seq=1, codec=82):
     return struct.pack("<7I4B", wire.LIVE_AUDIO, len(body), 1, 0, seq, 1, codec, 0, 0, 0, 0), body
 
 
-def source(monkeypatch, packets):
+def source(monkeypatch, packets, lens=0, layout="single"):
     reads = deque(part for packet in packets for part in packet)
     sent = []
     camera = SimpleNamespace(session=1, bridge=SimpleNamespace(timeout=15))
     camera.send = lambda command, body: sent.append((command, body))
 
     def read(session, channel, size, deadline):
+        assert channel == (2 if lens == 0 else 5)
         value = reads.popleft()
         assert len(value) == size
         return value
@@ -61,10 +62,11 @@ def source(monkeypatch, packets):
             shared=False,
             user_id=7,
             live_channel=2,
+            live_layout=layout,
         ),
     )
     monkeypatch.setattr("v360_web.streaming.CameraClient", lambda _: Client())
-    return camera_frames(None, threading.Event()), sent
+    return camera_frames(None, threading.Event(), lens=lens), sent
 
 
 def test_audio_request_demux_and_stop_commands(monkeypatch):
@@ -144,3 +146,15 @@ def test_audio_start_failure_closes_pipes_and_releases_camera(tmp_path, monkeypa
     for fd in pipes:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+def test_auxiliary_view_reads_channel_five_without_audio_request(monkeypatch):
+    packets, sent = source(monkeypatch, [video(), video(2)], lens=2, layout="dual-three")
+    config = next(packets)
+    assert config.kind == "config" and config.crop == "right" and config.data == b""
+    assert next(packets).kind == "video"
+    assert next(packets).kind == "video"
+    packets.close()
+    assert wire.AUDIO_START not in [cmd for cmd, body in sent]
+    assert wire.AUDIO_STOP not in [cmd for cmd, body in sent]
+    assert sent[-1][0] == wire.LIVE_STOP

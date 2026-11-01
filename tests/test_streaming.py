@@ -256,3 +256,35 @@ def test_audio_video_mux_shared_and_cleanup(hevc, tmp_path):
         assert manager.encoder_pid is None
     finally:
         manager.close()
+
+
+def test_different_lens_never_interrupts_existing_viewer_and_can_switch_after_stop(hevc, tmp_path):
+    calls = []
+
+    def source(config, stop):
+        calls.append(manager.lens)
+        while not stop.is_set():
+            yield hevc
+            stop.wait(0.1)
+
+    manager = StreamManager(tmp_path / "unused", threading.Lock(), source)
+    try:
+        first = manager.subscribe(1)
+        get(first, "init")
+        with pytest.raises(CameraError) as error:
+            manager.subscribe(2)
+        assert error.value.code == "lens_busy"
+        assert manager.snapshot()["viewers"] == 1 and manager.snapshot()["lens"] == 1
+        second = manager.subscribe(1)
+        get(second, "init")
+        manager.unsubscribe(first)
+        manager.unsubscribe(second)
+        manager.thread.join(6)
+        third = manager.subscribe(2)
+        get(third, "init")
+        assert calls == [1, 2]
+        manager.unsubscribe(third)
+        manager.thread.join(6)
+        assert not manager.camera_lock.locked() and manager.encoder_pid is None
+    finally:
+        manager.close()
