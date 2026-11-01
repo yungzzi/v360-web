@@ -168,8 +168,8 @@ async function loadTimeline(){
   if(!day)return;
   if(timelineData?.day!==day){timelineData=null;renderTimeline();$('recording-days').replaceChildren();$('timeline-message').textContent='正在读取当天目录…';}
   try{const value=await api('/api/library/timeline?day='+encodeURIComponent(day));if(generation!==timelineGeneration||day!==$('recording-day').value||!signedIn)return;
-    timelineData={...value,items:$('history-source').value==='ready'?value.items.filter(i=>i.playback_ready):value.items};renderTimeline();const days=$('recording-days');days.replaceChildren();
-    for(const entry of value.days){const button=document.createElement('button');button.className='quiet'+(entry.day===day?' selected':'');button.textContent=entry.day.slice(5)+' · '+entry.count;button.setAttribute('aria-label',entry.day+'，'+entry.count+' 段录像');button.addEventListener('click',()=>changeDay(entry.day));days.append(button);}
+    timelineData={...value,items:$('history-source').value==='ready'?value.items.filter(i=>i.playback_ready):value.items};$('timeline-title').textContent='录像时间轴 · '+($('history-source').value==='ready'?'可回放 '+timelineData.items.length+' / ':'')+'已发现 '+value.total;renderTimeline();const days=$('recording-days');days.replaceChildren();
+    for(const entry of value.days){const button=document.createElement('button');button.className='quiet'+(entry.day===day?' selected':'');button.textContent=entry.day.slice(5)+' · 已发现 '+entry.count;button.setAttribute('aria-label',entry.day+'，'+entry.count+' 段录像');button.addEventListener('click',()=>changeDay(entry.day));days.append(button);}
     $('timeline-message').textContent=($('history-source').value==='ready'?'可直接回放 '+timelineData.items.length+' 段 / 当天已发现 '+value.total+' 段。':'当天已发现 '+value.total+' 段；未就绪的片段需要下载或处理。')+(value.truncated?' 标记数量过多，仅显示最近 10000 段。':'')+(value.catalog?.metadata_complete?'':' 目录尚未确认完整。');
   }catch(error){if(generation===timelineGeneration){timelineData=null;renderTimeline();$('timeline-message').textContent=error.message;}}
 }
@@ -204,16 +204,11 @@ function seekTimeline(second){
   if(item){chooseTimeline(item,second-item.second);return;}
   $('replay-video').pause();
   if(!items.length){$('timeline-message').textContent='这一天没有已知录像，请切换日期或更新目录。';return;}
-  // Choose the nearest actual interval, not its enlarged visual marker.
-  const nearest=items.reduce((best,i)=>{
-    const end=i.second+(i.duration_hint||1);
-    const distance=second<i.second?i.second-second:second-end;
-    if(!best||distance<best.distance||(distance===best.distance&&i.second>best.item.second))return {item:i,distance};
-    return best;
-  },null).item;
-  timelineCenter=nearest.second;selectTimelineTime(nearest.second);renderTimeline();
-  $('timeline-message').textContent='所选时间没有录像，已自动定位到 '+clockText(nearest.second)+'。';
-  chooseTimeline(nearest,0);
+  const next=items.find(i=>i.second>second);
+  if(!next){$('timeline-message').textContent='当天这个时间之后没有可用录像，请选择更早时间或切换日期。';return;}
+  timelineCenter=next.second;selectTimelineTime(next.second);renderTimeline();
+  $('timeline-message').textContent='所选时间没有录像，已向后定位到 '+clockText(next.second)+'。';
+  chooseTimeline(next,0);
 }
 const timelineSlider=$('timeline-seek');
 function selectTimelineTime(second){const text=clockText(second);$('timeline-time').value=text;$('timeline-selected').value=text;timelineSlider.setAttribute('aria-valuetext',text);}
