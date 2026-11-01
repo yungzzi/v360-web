@@ -199,3 +199,28 @@ def test_timeline_uses_whole_day_not_list_page_and_hides_private_fields(prepared
         assert other_day["items"][0]["duration_hint"] is None
         empty = client.get("/api/library/timeline?day=2026-11-01", headers=HEADERS).json()
         assert empty["total"] == 0 and empty["days"] == []
+
+
+def test_playback_reports_real_conversion_progress_and_timings(prepared):
+    root, _store, key, config = prepared
+    values = []
+    handle = progress.callback.set(values.append)
+    try:
+        result = playback.prepare(config, key)
+    finally:
+        progress.callback.reset(handle)
+    assert playback.ready(root, key) is not None
+    assert result["conversion_seconds"] > 0 and result["validation_seconds"] > 0
+    updates = [v for v in values if "total_seconds" in v]
+    assert updates and all(0 <= v["seconds"] <= v["total_seconds"] for v in updates)
+    assert any(v["stage"] == "validating_playback" for v in values)
+
+
+@pytest.mark.parametrize("value", ["N/A", "bad", "00:00:nan", "00:00:-1", ""])
+def test_playback_progress_tolerates_invalid_output(value):
+    assert playback.parse_progress_time(value, 2.0) == 2.0
+
+
+def test_playback_progress_time_is_monotonic():
+    assert playback.parse_progress_time("00:01:03.250000") == 63.25
+    assert playback.parse_progress_time("00:00:01", 2.0) == 2.0

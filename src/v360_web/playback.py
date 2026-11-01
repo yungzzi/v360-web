@@ -1,6 +1,7 @@
 """Bounded browser-compatible previews generated from verified SD recordings."""
 
 import math
+import os
 import re
 import subprocess
 import time
@@ -116,13 +117,42 @@ def prepare(config: Path, key: str):
         "96k",
         "-movflags",
         "+faststart",
+        "-progress",
+        "pipe:1",
+        "-stats_period",
+        "1",
         str(temporary),
     ]
-    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.monotonic() + 120
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    os.set_blocking(process.stdout.fileno(), False)
+    started = time.monotonic()
+    deadline = started + 120
+    progress_buffer = b""
+    processed = 0.0
+    next_report = started
     try:
         while process.poll() is None:
             check_cancelled()
+            try:
+                progress_buffer += os.read(process.stdout.fileno(), 65536)
+            except BlockingIOError:
+                pass
+            lines = progress_buffer.split(b"\n")
+            progress_buffer = lines.pop()[-1024:]
+            for line in lines:
+                if line.startswith(b"out_time="):
+                    processed = parse_progress_time(
+                        line[9:].decode("ascii", errors="ignore"), processed
+                    )
+            now = time.monotonic()
+            if now >= next_report:
+                report(
+                    "preparing_playback",
+                    seconds=min(duration, processed),
+                    total_seconds=duration,
+                    elapsed=round(now - started, 1),
+                )
+                next_report = now + 1
             if time.monotonic() > deadline:
                 raise CameraError(
                     "preview_timeout", "Playback preparation exceeded its time limit."
@@ -142,9 +172,12 @@ def prepare(config: Path, key: str):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2)
+        process.stdout.close()
+    conversion_seconds = time.monotonic() - started
     if temporary.stat().st_size > reservation:
         raise CameraError("storage_limit", "Playback exceeded its storage reservation.")
-    report("validating_playback")
+    report("validating_playback", elapsed=round(conversion_seconds, 1))
+    validation_started = time.monotonic()
     result = probe(temporary)
     if abs(float(result["format"]["duration"]) - duration) > 0.25:
         raise CameraError("preview_truncated", "Playback duration differs from the recording.")
@@ -162,5 +195,17 @@ def prepare(config: Path, key: str):
         "id": key,
         "state": "ready",
         "seconds": duration,
+        "conversion_seconds": round(conversion_seconds, 3),
+        "validation_seconds": round(time.monotonic() - validation_started, 3),
         "audio": any(s["codec_type"] == "audio" for s in result["streams"]),
     }
+
+
+def parse_progress_time(value, previous=0.0):
+    """Read FFmpeg's out_time field without allowing malformed progress to fail a job."""
+    try:
+        hour, minute, second = (float(part) for part in value.strip().split(":"))
+        result = hour * 3600 + minute * 60 + second
+        return max(previous, result) if math.isfinite(result) and result >= 0 else previous
+    except (ValueError, TypeError):
+        return previous
