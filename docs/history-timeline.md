@@ -15,3 +15,9 @@ Live and replay snapshots use the current decoded browser frame and trigger a JP
 Authenticated API tests cover device isolation, dates, full-day vs paginated lists, missing/invalid duration and private-field exclusion. Browser acceptance uses an isolated fixture database with synthetic dates and an existing camera sample, not a new camera connection. Edge playback, timeline selection, date changes, playback cursor and mobile-width overflow were checked. Snapshot generation and download initiation were observed; the browser automation download-event wait timed out, so downloaded-file persistence is not yet accepted. Actual Android/iOS playback is still unverified.
 
 Talkback and auxiliary recordings are explicitly excluded. Thumbnail grids, battery calibration, bounded live reconnection and camera settings remain follow-up work. No server retention or transfer-budget increase is part of this change.
+
+## Drag-to-seek revision
+
+Playback is above the timeline. The always-visible blue cursor is a native range control supporting mouse, touch and keyboard. Input updates selection and pauses playback; release commits one seek/download operation. Gaps preserve selection and report the next known recording without silently downloading it. Previous/next-clip buttons allow explicit gap skipping. Same-file seeks reuse the loaded player. File management and backup settings are collapsed, preserving download/pin capabilities outside the main viewing flow.
+
+GitHub synchronization is source archiving, not a prerequisite for this locally built Docker Hub release process. The server runs an already-installed compose.yaml with a digest-pinned image. compose.ops.yaml is an explicitly selected, network-disabled backup overlay with an additional backups bind mount, not a second resident backend.
