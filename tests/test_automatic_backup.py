@@ -108,6 +108,7 @@ def test_cache_pressure_never_deletes_original(tmp_path, monkeypatch):
 
 
 def manager(root, monkeypatch):
+    monkeypatch.setattr("v360_web.backup.playback.prepare", lambda *args: {"state": "ready"})
     monkeypatch.setattr(
         "v360_web.backup.Settings.load", lambda _: SimpleNamespace(did="test-device")
     )
@@ -306,6 +307,8 @@ def test_new_queue_precedes_history_and_summary_counts(tmp_path, monkeypatch):
     assert len(queries) == 1
     assert backup.snapshot()["archive"] == {
         "ready": 0,
+        "awaiting_playback": 12,
+        "pending_in_scope": 11,
         "oldest_ready": None,
         "ready_span_days": 0,
         "saved": 1,
@@ -316,14 +319,14 @@ def test_new_queue_precedes_history_and_summary_counts(tmp_path, monkeypatch):
     }
 
 
-def test_older_than_seven_days_is_downloaded(tmp_path, monkeypatch):
+def test_history_outside_three_days_is_not_downloaded(tmp_path, monkeypatch):
     backup = manager(tmp_path, monkeypatch)
     policy(tmp_path, mode="server")
-    key, _ = record(tmp_path, 10 * 24 * 60, state="discovered")
+    _key, _ = record(tmp_path, 10 * 24 * 60, state="discovered")
     calls = []
     monkeypatch.setattr(service, "download", lambda config, key: calls.append(key))
     backup.cycle()
-    assert calls == [key]
+    assert calls == []
 
 
 def test_failed_history_query_preserves_cursor(tmp_path, monkeypatch):
@@ -339,7 +342,7 @@ def test_failed_history_query_preserves_cursor(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service, "discover", discover)
     backup.cycle()
-    assert backup.db.read("backfill:test-device") is None
+    assert backup.db.read("backfill3:test-device") is None
     assert not backup.running
 
 
@@ -360,11 +363,14 @@ def test_history_failure_does_not_block_known_downloads(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "download", lambda config, key: calls.append(key))
     backup.cycle()
     assert calls == [key]
-    assert backup.snapshot()["backfill_error"] == "sdk_connect"
+    assert len(queries) == 1
+    assert backup.snapshot().get("backfill_error") is None
     assert backup.snapshot()["error"] is None
 
 
-def test_backlog_waits_half_hour_without_daily_budget(tmp_path, monkeypatch):
+def test_server_pipeline_exceeds_ten_and_finishes_each_record_before_next_download(
+    tmp_path, monkeypatch
+):
     backup = manager(tmp_path, monkeypatch)
     policy(tmp_path, mode="server")
     for i in range(11):
@@ -374,13 +380,25 @@ def test_backlog_waits_half_hour_without_daily_budget(tmp_path, monkeypatch):
         progress.report("downloading", bytes=0, total=100)
         RecordingStore(tmp_path).update(key, "verified")
 
-    monkeypatch.setattr(service, "download", save)
+    from v360_web import playback
+
+    events = []
+
+    def download(config, key):
+        events.append(("download", key))
+        save(config, key)
+
+    monkeypatch.setattr(service, "download", download)
+    monkeypatch.setattr(playback, "prepare", lambda config, key: events.append(("prepare", key)))
     backup.cycle()
     state = backup.snapshot()
-    assert state["archive"]["pending"] == 1
-    assert 1790 < state["next_run"] - time.time() <= 1800
+    assert state["archive"]["pending"] == 0
+    assert 590 < state["next_run"] - time.time() <= 600
+    assert len(events) == 22
+    for i in range(0, 22, 2):
+        assert events[i][0] == "download" and events[i + 1] == ("prepare", events[i][1])
     assert state["policy"]["daily_bytes"] is None
-    assert backup.db.read("daily")["bytes"] == 1000
+    assert backup.db.read("daily")["bytes"] == 1100
 
 
 def test_server_prepares_saved_recordings_without_downloading_them(tmp_path, monkeypatch):
@@ -429,7 +447,7 @@ def test_combined_server_budget_removes_old_pair_and_preserves_pins(tmp_path, mo
     assert pin_path.exists() and recent_path.exists()
 
 
-def test_server_preparation_failures_are_bounded_per_cycle(tmp_path, monkeypatch):
+def test_server_preparation_failures_stop_at_work_window(tmp_path, monkeypatch):
     from v360_web import playback
 
     backup = manager(tmp_path, monkeypatch)
@@ -439,10 +457,14 @@ def test_server_preparation_failures_are_bounded_per_cycle(tmp_path, monkeypatch
     calls = []
     monkeypatch.setattr(playback, "ready", lambda *args: None)
 
+    clock = [0]
+    monkeypatch.setattr("v360_web.backup.time.monotonic", lambda: clock[0])
+
     def fail(config, key):
+        clock[0] += 151
         calls.append(key)
         raise CameraError("preview_failed", "fixture")
 
     monkeypatch.setattr(playback, "prepare", fail)
     backup.cycle()
-    assert len(calls) == 10
+    assert len(calls) == 2

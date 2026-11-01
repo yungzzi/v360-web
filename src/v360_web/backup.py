@@ -28,6 +28,7 @@ class BackupManager:
         self.running = False
         self.ready_summary_until = 0
         self.ready_summary = {}
+        self.recent_ready_count = 0
         state = self.db.read("status", {})
         self.state = {
             **state,
@@ -98,6 +99,10 @@ class BackupManager:
                 except (OSError, ValueError):
                     continue
             ready_dates.sort()
+            cutoff = (
+                datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None) - timedelta(days=3)
+            ).isoformat()
+            self.recent_ready_count = sum(day >= cutoff for day in ready_dates)
             self.ready_summary = {
                 "ready": len(ready_dates),
                 "oldest_ready": ready_dates[0] if ready_dates else None,
@@ -113,8 +118,21 @@ class BackupManager:
                 else 0,
             }
             self.ready_summary_until = time.monotonic() + 30
+        with self.db.connection() as db:
+            in_scope = db.execute(
+                "SELECT count(*),coalesce(sum(state!='verified'),0) FROM recordings WHERE device_id=? AND state!='evicted' AND start_local>=?",
+                (
+                    did,
+                    (
+                        datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
+                        - timedelta(days=3)
+                    ).isoformat(),
+                ),
+            ).fetchone()
         return {
             **self.ready_summary,
+            "awaiting_playback": max(0, in_scope[0] - self.recent_ready_count),
+            "pending_in_scope": in_scope[1],
             "saved": counts.get("verified", 0),
             "saved_bytes": saved_bytes,
             "pending": sum(v for k, v in counts.items() if k not in ("verified", "evicted")),
@@ -216,7 +234,9 @@ class BackupManager:
                 raise CameraError("backup_yielded", "Automatic work window finished.")
             if value["stage"] == "downloading" and not current_charged:
                 total = value["total"]
-                if total > policy["batch_bytes"] - charged or (
+                if (
+                    policy["batch_bytes"] is not None and total > policy["batch_bytes"] - charged
+                ) or (
                     policy["daily_bytes"] is not None
                     and total > policy["daily_bytes"] - accounting["bytes"]
                 ):
@@ -261,53 +281,92 @@ class BackupManager:
                     for row in self.db.list()
                     if row["device_id"] == settings.did
                     and row["channel"] == 0
-                    and row["state"] not in ("verified", "evicted")
-                    and row["start_local"] >= (end - timedelta(days=30)).isoformat()
+                    and row["state"] != "evicted"
+                    and (
+                        row["state"] != "verified"
+                        or (policy["mode"] == "server" and not playback.ready(self.root, row["id"]))
+                    )
+                    and row["start_local"]
+                    >= (end - timedelta(days=3 if policy["mode"] == "server" else 30)).isoformat()
                     and row["start_local"] <= end.isoformat()
-                    and self.retry_ready(row["id"], time.time())
+                    and (
+                        policy["mode"] != "server"
+                        or datetime.fromisoformat(row["start_local"])
+                        + timedelta(seconds=max(0, min(row["duration_raw"], 3600)))
+                        <= end
+                    )
+                    and self.retry_ready(
+                        ("prepare:" if row["state"] == "verified" else "") + row["id"], time.time()
+                    )
                 ]
                 return sorted(rows, key=lambda row: row["start_local"], reverse=True)
 
             rows = candidates()
             # Only query one older day when the recent queue leaves room this round.
             # Cursor is persisted after a successful query; failures retry the same day.
-            if policy["mode"] == "server" and len(rows) < policy["batch_files"]:
+            if policy["mode"] == "server" and not rows:
                 progress.check_cancelled()
-                cursor_key = "backfill:" + settings.did
+                cursor_key = "backfill3:" + settings.did
                 cursor = self.db.read(cursor_key, {})
-                offset = cursor.get("offset", 1)
+                offset = (
+                    cursor.get("offset", 1) if cursor.get("anchor") == end.date().isoformat() else 1
+                )
                 today = end.date()
                 day_to_query = today - timedelta(days=offset)
                 start = datetime.combine(day_to_query, daytime.min)
                 try:
-                    historical = service.discover(
-                        self.config, 0, start, start + timedelta(days=1) - timedelta(seconds=1)
+                    historical = (
+                        service.discover(
+                            self.config, 0, start, start + timedelta(days=1) - timedelta(seconds=1)
+                        )
+                        if offset <= 2
+                        else None
                     )
                 except CameraError as error:
                     if error.code in ("backup_yielded", "device_authentication", "sdk_initialize"):
                         raise
                     self.update(backfill_error=error.code)
                 else:
-                    self.db.write(cursor_key, {"offset": offset % 29 + 1})
+                    if historical is not None:
+                        self.db.write(
+                            cursor_key, {"offset": offset + 1, "anchor": today.isoformat()}
+                        )
                     self.update(
-                        backfill_day=day_to_query.isoformat(),
-                        backfill_complete=historical["metadata_complete"],
-                        backfill_horizon_days=30,
+                        backfill_day=day_to_query.isoformat()
+                        if historical
+                        else self.state.get("backfill_day"),
+                        backfill_complete=historical["metadata_complete"]
+                        if historical
+                        else self.state.get("backfill_complete"),
+                        backfill_horizon_days=3,
                         backfill_error=None,
                     )
                 rows = candidates()
             attempts = 0
+            prepared = 0
             for row in rows:
                 progress.check_cancelled()
-                if attempts >= policy["batch_files"] or charged >= policy["batch_bytes"]:
+                if (
+                    (policy["batch_files"] is not None and attempts >= policy["batch_files"])
+                    or (policy["batch_bytes"] is not None and charged >= policy["batch_bytes"])
+                    or (policy["mode"] == "server" and time.monotonic() - cycle_started > 300)
+                ):
                     break
-                if not self.retry_ready(row["id"], time.time()):
+                if not self.retry_ready(
+                    ("prepare:" if row["state"] == "verified" else "") + row["id"], time.time()
+                ):
                     continue
                 attempts += 1
                 current_charged = False
                 try:
-                    service.download(self.config, row["id"])
-                    downloaded += 1
+                    if row["state"] != "verified":
+                        service.download(self.config, row["id"])
+                        downloaded += 1
+                    if policy["mode"] == "server":
+                        progress.check_cancelled()
+                        playback.prepare(self.config, row["id"])
+                        prepared += 1
+                        self.ready_summary_until = 0
                     with self.db.connection() as db:
                         db.execute("DELETE FROM backup_retries WHERE id=?", (row["id"],))
                 except CameraError as error:
@@ -319,52 +378,18 @@ class BackupManager:
                         "storage_limit",
                     ):
                         raise
-                    self.failed(row["id"], time.time())
+                    self.failed(
+                        (
+                            "prepare:"
+                            if (self.db.get(row["id"]) or {}).get("state") == "verified"
+                            else ""
+                        )
+                        + row["id"],
+                        time.time(),
+                    )
                     self.update(last_file_error=error.code)
                     if error.code == "backup_budget":
                         break
-            # Downloads close their camera sessions before local preparation begins.
-            # Prepare only a bounded recent batch; incomplete work continues next cycle.
-            prepared = 0
-            prepare_attempts = 0
-            if policy["mode"] == "server":
-                local_rows = sorted(
-                    (
-                        row
-                        for row in self.db.list()
-                        if row["device_id"] == settings.did
-                        and row["state"] == "verified"
-                        and row["channel"] == 0
-                        and row["start_local"] >= (end - timedelta(days=30)).isoformat()
-                    ),
-                    key=lambda row: row["start_local"],
-                    reverse=True,
-                )
-                for row in local_rows:
-                    progress.check_cancelled()
-                    if (
-                        prepare_attempts >= policy["batch_files"]
-                        or time.monotonic() - cycle_started > 300
-                    ):
-                        break
-                    if playback.ready(self.root, row["id"]) or not self.retry_ready(
-                        "prepare:" + row["id"], time.time()
-                    ):
-                        continue
-                    prepare_attempts += 1
-                    try:
-                        playback.prepare(self.config, row["id"])
-                        prepared += 1
-                    except CameraError as error:
-                        if error.code in (
-                            "backup_yielded",
-                            "interrupted",
-                            "disk_reserve",
-                            "storage_limit",
-                        ):
-                            raise
-                        self.failed("prepare:" + row["id"], time.time())
-                        self.update(last_prepare_error=error.code)
             self.update(last_prepared=prepared)
             self.update(
                 state="waiting",
@@ -383,7 +408,7 @@ class BackupManager:
             self.update(state=state, error=error.code)
             self.jobs.update_job(job_id, state="failed", **error.as_dict())
             if error.code == "backup_yielded":
-                next_run = time.time() + policy["interval_minutes"] * 60
+                next_run = max(time.time() + 30, next_run)
         except Exception:  # noqa: BLE001 - Keep the background scheduler alive after unexpected failures.
             self.update(state="failed", error="backup_failed")
             self.jobs.update_job(job_id, state="failed", error="backup_failed")
@@ -394,6 +419,9 @@ class BackupManager:
                 self.running = False
                 self.cancel = None
                 self.update(next_run=next_run)
+            self.update(
+                last_saved=downloaded, last_prepared=prepared if "prepared" in locals() else 0
+            )
             self.camera_lock.release()
 
     def run(self):

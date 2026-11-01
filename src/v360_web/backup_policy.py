@@ -11,8 +11,8 @@ PROFILES = {
     },
     "server": {
         "archive_limit": 15 * 1024**3,
-        "batch_files": 10,
-        "batch_bytes": 64 * 1024**2,
+        "batch_files": None,
+        "batch_bytes": None,
         "daily_bytes": None,
     },
 }
@@ -41,5 +41,5 @@ class BackupPolicy(RecordingStore):
         return {
             **value,
             **PROFILES[value["mode"]],
-            **({"interval_minutes": 30} if value["mode"] == "server" else {}),
+            **({"interval_minutes": 10} if value["mode"] == "server" else {}),
         }
