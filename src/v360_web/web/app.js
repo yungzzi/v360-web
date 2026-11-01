@@ -111,24 +111,24 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden)sendMove('s
 
 let libraryOffset=0, libraryTotal=0, libraryBusy=false, mediaSessionUntil=0;
 let backupState=null, replayKey=null, backupFinished=null;
-let timelineDragging=false, timelinePointer=null;
+let timelineDragging=false, timelinePointer=null, timelineGesture=0, timelineCommitted=-1, pendingTimelineSeek=null;
 let timelineData=null, timelineGeneration=0, timelineStart=0, timelineCenter=43200, replayItem=null, replayGeneration=0;
 const LIBRARY_PAGE_SIZE=10;
 const stateLabels={discovered:'尚未下载',downloading:'正在下载',downloaded_unverified:'待检查',verified:'已保存',evicted:'已按保留规则清理',failed:'下载失败'};
 const stageLabels={connecting:'正在连接摄像头',downloading:'正在下载录像',validating:'正在检查录像',preparing_playback:'正在准备网页回放',validating_playback:'正在检查回放文件'};
 const jobErrors={storage_limit:'空间预算已满，暂时不能新增文件。',disk_reserve:'需要给系统保留更多磁盘空间，任务已停止。',interrupted:'上次服务重启中断了任务，可以重新操作。',preview_timeout:'准备回放用时过长，原始录像仍保留。',preview_truncated:'回放文件检查未通过，原片仍保留。'};
 function libraryMessage(text){$('library-notice').textContent=text;}
-function clearReplay(){replayGeneration++;replayKey=null;replayItem=null;$('replay-snapshot').disabled=true;$('timeline-cursor').hidden=true;$('replay-title').textContent='选择一个片段';$('replay-message').textContent='原片会保留在服务器，回放文件按需准备。';const v=$('replay-video');if(v){v.pause();v.removeAttribute('src');v.load();}mediaSessionUntil=0;}
+function clearReplay(){pendingTimelineSeek=null;replayGeneration++;replayKey=null;replayItem=null;$('replay-snapshot').disabled=true;$('timeline-cursor').hidden=true;$('replay-title').textContent='选择一个片段';$('replay-message').textContent='原片会保留在服务器，回放文件按需准备。';const v=$('replay-video');if(v){v.pause();v.removeAttribute('src');v.load();}mediaSessionUntil=0;}
 function setTab(library){if(library)resetPlayer('已切换到历史录像。');else{clearReplay();if(!playing){status('已返回实时观看，可以开始连接摄像头。');$('player-message').textContent='点击「开始观看」连接摄像头';}}$('live-panel').hidden=library;$('library-panel').hidden=!library;$('tab-live').classList.toggle('selected',!library);$('tab-library').classList.toggle('selected',library);if(library){loadLibrary();recoverLibraryJob();}}
 $('tab-live').addEventListener('click',()=>setTab(false));$('tab-library').addEventListener('click',()=>setTab(true));
 const localToday=new Date();$('recording-day').value=[localToday.getFullYear(),String(localToday.getMonth()+1).padStart(2,'0'),String(localToday.getDate()).padStart(2,'0')].join('-');
 async function api(path,options={}){let response;try{response=await appFetch(path,{...options,headers:{...options.headers}});}catch{throw new Error('无法连接后端，请确认服务仍在运行。');}if(response.status===401){showLogin();throw new Error('登录已失效，请重新登录。');}if(response.status===409)throw new Error('摄像头或服务正在处理其他任务，请停止直播并稍后再试。');if(!response.ok)throw new Error('操作未成功，请稍后重试。');return response.json();}
 function sizeText(bytes){return bytes>=1024**3?(bytes/1024**3).toFixed(2)+' GiB':(bytes/1024**2).toFixed(1)+' MiB';}
 async function playbackSession(){if(Date.now()<mediaSessionUntil)return;await api('/api/playback/session',{method:'POST'});mediaSessionUntil=Date.now()+50*60000;}
-function setLibraryBusy(value){libraryBusy=value;$('timeline-seek').disabled=value;$('query-recordings').disabled=value;document.querySelectorAll('[data-recording-action]').forEach(button=>button.disabled=value);}
-async function waitJob(job){$('job-panel').hidden=false;for(;;){if(!signedIn||serviceStopped)throw new Error('操作页面已关闭；后台任务仍按当前状态处理。');const value=await api('/api/jobs/'+job.id);const progress=value.progress||{};$('job-label').textContent=stageLabels[progress.stage]||'正在处理';if(progress.total){$('job-progress').value=Math.min(100,100*progress.bytes/progress.total);$('job-detail').textContent=sizeText(progress.bytes)+' / '+sizeText(progress.total);}else{$('job-progress').removeAttribute('value');$('job-detail').textContent='请稍候，结束后自动更新列表';}if(value.state==='complete'){$('job-panel').hidden=true;return value.result;}if(value.state==='failed'){$('job-panel').hidden=true;throw new Error(jobErrors[value.error]||'处理失败，文件未标记为可播放，可以重试。');}await new Promise(resolve=>setTimeout(resolve,750));}}
+function setLibraryBusy(value){libraryBusy=value;$('timeline-seek').disabled=!timelineData;$('query-recordings').disabled=value;document.querySelectorAll('[data-recording-action]').forEach(button=>button.disabled=value);if(!value)queueMicrotask(flushTimelineSeek);}
+async function waitJob(job){$('job-panel').hidden=false;for(;;){if(!signedIn||serviceStopped)throw new Error('操作页面已关闭；后台任务仍按当前状态处理。');const value=await api('/api/jobs/'+job.id);const progress=value.progress||{};$('job-label').textContent=stageLabels[progress.stage]||'正在处理';if(progress.total_seconds){$('job-progress').value=Math.min(99,100*progress.seconds/progress.total_seconds);$('job-detail').textContent='已处理 '+Math.floor(progress.seconds)+' / '+Math.ceil(progress.total_seconds)+' 秒录像 · 已等待 '+Math.floor(progress.elapsed||0)+' 秒';}else if(progress.total){$('job-progress').value=Math.min(100,100*progress.bytes/progress.total);$('job-detail').textContent=sizeText(progress.bytes)+' / '+sizeText(progress.total);}else{$('job-progress').removeAttribute('value');$('job-detail').textContent=progress.stage==='validating_playback'?'转换完成，正在检查文件；检查通过后自动播放':'请稍候，完成后自动继续';}if(value.state==='complete'){$('job-panel').hidden=true;return value.result;}if(value.state==='failed'){$('job-panel').hidden=true;throw new Error(jobErrors[value.error]||'处理失败，文件未标记为可播放，可以重试。');}await new Promise(resolve=>setTimeout(resolve,750));}}
 async function loadLibrary(){if(!signedIn)return;loadTimeline();try{const day=$('recording-day').value,offset=libraryOffset;const value=await api('/api/library?day='+encodeURIComponent(day)+'&offset='+libraryOffset+'&limit='+LIBRARY_PAGE_SIZE);if(day!==$('recording-day').value||offset!==libraryOffset||!signedIn)return;libraryTotal=value.total;$('recording-count').textContent=libraryTotal+' 个片段';$('page-label').textContent=libraryTotal?'第 '+(Math.floor(libraryOffset/LIBRARY_PAGE_SIZE)+1)+' / '+Math.ceil(libraryTotal/LIBRARY_PAGE_SIZE)+' 页':'暂无记录';$('previous-page').disabled=libraryOffset===0;$('next-page').disabled=libraryOffset+LIBRARY_PAGE_SIZE>=libraryTotal;const catalog=value.catalog;$('catalog-message').textContent=catalog?(catalog.metadata_complete?'当天目录已查询。':'设备目录含异常条目，当前列表可能不完整。'):'尚未查询这一天的摄像头目录；当前仅展示已知片段。';const space=value.storage;$('storage-info').textContent='录像占用 '+sizeText(space.archive_bytes)+' / '+sizeText(space.archive_limit)+'\n回放缓存 '+sizeText(space.cache_bytes)+' / '+sizeText(space.cache_limit)+'\n自动清理旧副本；锁定或正在使用的录像会保留。';const list=$('recording-list');list.replaceChildren();if(!value.items.length){const empty=document.createElement('p');empty.className='recording-empty';empty.textContent='这一天还没有本地记录，可更新摄像头目录查看。';list.append(empty);}for(const item of value.items){const row=document.createElement('div');row.className='recording-row';const details=document.createElement('div');const title=document.createElement('strong');title.textContent=item.start_local.replace('T',' ');details.append(title);const note=document.createElement('small');note.textContent=item.bytes?sizeText(item.bytes):'设备上的录像片段';details.append(note);const actions=document.createElement('div');actions.className='recording-actions';const state=document.createElement('span');state.className='recording-state'+(item.original_ready?' ready':'');state.textContent=stateLabels[item.state]||'等待处理';actions.append(state);const button=document.createElement('button');button.className=item.original_ready?'primary':'quiet';button.dataset.recordingAction='true';button.textContent=item.original_ready?'播放':'立即保存这段';button.disabled=libraryBusy;button.addEventListener('click',()=>recordingAction(item));actions.append(button);if(item.original_ready){const pin=document.createElement('button');pin.className='quiet';pin.textContent=item.pinned?'解锁保留':'锁定保留';pin.addEventListener('click',async()=>{try{await api('/api/recordings/'+item.id+'/pin',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned:!item.pinned})});await loadLibrary();}catch(e){libraryMessage(e.message);}});actions.append(pin);const download=document.createElement('button');download.className='quiet';download.textContent='下载原片';download.dataset.recordingAction='true';download.disabled=libraryBusy;download.addEventListener('click',async()=>{try{await playbackSession();const link=document.createElement('a');link.href=appUrl('/api/recordings/'+item.id+'/file');link.download='';document.body.append(link);link.click();link.remove();}catch(e){libraryMessage(e.message);}});actions.append(download);}row.append(details,actions);list.append(row);}}catch(error){libraryMessage(error.message);}}
-async function recordingAction(item,seek=0){if(libraryBusy)return;setLibraryBusy(true);const generation=++replayGeneration;try{if(replayKey===item.id&&$('replay-video').readyState>=1){const v=$('replay-video');v.currentTime=Math.min(Math.max(0,seek),Math.max(0,v.duration-0.1));v.play().catch(()=>{});return;}if(!item.original_ready){const job=await api('/api/jobs/download/'+item.id,{method:'POST'});await waitJob(job);libraryMessage('录像已保存并检查通过，现在可以播放。');await loadLibrary();item={...item,original_ready:true};}if(!item.playback_ready){const job=await api('/api/jobs/playback/'+item.id,{method:'POST'});await waitJob(job);}if(!signedIn||generation!==replayGeneration)return;await playbackSession();if(!signedIn||generation!==replayGeneration)return;replayKey=item.id;replayItem=item;await api('/api/recordings/'+item.id+'/lease',{method:'POST'});if(!signedIn||generation!==replayGeneration)return;$('replay-title').textContent=item.start_local.replace('T',' ');const video=$('replay-video');video.pause();video.src=appUrl('/api/recordings/'+item.id+'/preview');$('replay-message').textContent='已准备好回放。原片有声音时会保留声音，可使用播放器静音。';video.onloadedmetadata=()=>{if(generation!==replayGeneration||replayKey!==item.id)return;if(Number.isFinite(video.duration))video.currentTime=Math.min(Math.max(0,seek),Math.max(0,video.duration-0.1));$('replay-snapshot').disabled=false;};video.load();video.play().catch(()=>libraryMessage('回放已准备好，点击播放器的播放按钮开始。'));await loadLibrary();}catch(error){libraryMessage(error.message);}finally{$('job-panel').hidden=true;setLibraryBusy(false);}}
+async function recordingAction(item,seek=0){if(libraryBusy)return;setLibraryBusy(true);const generation=++replayGeneration;try{if(replayKey===item.id&&$('replay-video').readyState>=1){const v=$('replay-video');v.currentTime=Math.min(Math.max(0,seek),Math.max(0,v.duration-0.1));v.play().catch(()=>libraryMessage('已定位，请点击播放器播放按钮继续。'));return;}if(!item.original_ready){const job=await api('/api/jobs/download/'+item.id,{method:'POST'});await waitJob(job);libraryMessage('录像已保存并检查通过，现在可以播放。');await loadLibrary();item={...item,original_ready:true};}if(!item.playback_ready){const job=await api('/api/jobs/playback/'+item.id,{method:'POST'});await waitJob(job);}if(!signedIn||generation!==replayGeneration)return;await playbackSession();if(!signedIn||generation!==replayGeneration)return;replayKey=item.id;replayItem=item;await api('/api/recordings/'+item.id+'/lease',{method:'POST'});if(!signedIn||generation!==replayGeneration)return;$('replay-title').textContent=item.start_local.replace('T',' ');const video=$('replay-video');video.pause();video.src=appUrl('/api/recordings/'+item.id+'/preview');$('replay-message').textContent='已准备好回放。原片有声音时会保留声音，可使用播放器静音。';video.onloadedmetadata=()=>{if(generation!==replayGeneration||replayKey!==item.id)return;if(Number.isFinite(video.duration))video.currentTime=Math.min(Math.max(0,seek),Math.max(0,video.duration-0.1));$('replay-snapshot').disabled=false;};video.load();video.play().catch(()=>libraryMessage('回放已准备好，点击播放器的播放按钮开始。'));await loadLibrary();}catch(error){libraryMessage(error.message);}finally{$('job-panel').hidden=true;setLibraryBusy(false);}}
 $('query-recordings').addEventListener('click',async()=>{if(libraryBusy)return;setLibraryBusy(true);try{const day=$('recording-day').value;if(!day)throw new Error('请先选择日期。');const job=await api('/api/jobs/list',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:0,start:day+'T00:00:00',end:day+'T23:59:59'})});const result=await waitJob(job);libraryOffset=0;await loadLibrary();libraryMessage(result.metadata_complete?'当天摄像头目录已更新。':'目录已更新，但设备返回异常条目，暂不能确认完整。');}catch(error){libraryMessage(error.message);}finally{$('job-panel').hidden=true;setLibraryBusy(false);}});
 $('refresh-library').addEventListener('click',loadLibrary);$('recording-day').addEventListener('change',()=>{libraryOffset=0;loadLibrary();});$('previous-page').addEventListener('click',()=>{libraryOffset=Math.max(0,libraryOffset-LIBRARY_PAGE_SIZE);loadLibrary();});$('next-page').addEventListener('click',()=>{libraryOffset+=LIBRARY_PAGE_SIZE;loadLibrary();});
 window.addEventListener('pagehide',clearReplay);
@@ -172,6 +172,8 @@ async function loadTimeline(){
   }catch(error){if(generation===timelineGeneration){timelineData=null;renderTimeline();$('timeline-message').textContent=error.message;}}
 }
 function renderTimeline(){
+  if(timelineDragging)return;
+  $('timeline-seek').disabled=!timelineData;
   const span=Number($('timeline-scale').value);timelineStart=Math.max(0,Math.min(86400-span,timelineCenter-span/2));
   const slider=$('timeline-seek');slider.min=Math.ceil(timelineStart);slider.max=Math.min(86399,Math.floor(timelineStart+span));slider.value=clockSeconds($('timeline-time').value);
   const ticks=$('timeline-ticks');ticks.replaceChildren();
@@ -183,23 +185,49 @@ function renderTimeline(){
   }
   updateTimelineCursor();
 }
-function chooseTimeline(item,offset){selectTimelineTime(item.second+offset);if(libraryBusy){libraryMessage('正在处理上一项任务，请稍候。');return;}recordingAction(item,offset);}
+function chooseTimeline(item,offset){
+  selectTimelineTime(item.second+offset);
+  if(libraryBusy){pendingTimelineSeek={item,offset,day:$('recording-day').value};libraryMessage('正在处理上一项，完成后将回放最后选中的时间。');return;}
+  recordingAction(item,offset);
+}
+function flushTimelineSeek(){
+  if(libraryBusy||!pendingTimelineSeek)return;
+  const pending=pendingTimelineSeek;pendingTimelineSeek=null;
+  if(signedIn&&!$('library-panel').hidden&&pending.day===$('recording-day').value)chooseTimeline(pending.item,pending.offset);
+}
 function seekTimeline(second){
+  pendingTimelineSeek=null;
   const items=timelineData?.items||[];
   const item=[...items].reverse().find(i=>second>=i.second&&second<i.second+(i.duration_hint||1));
   if(item){chooseTimeline(item,second-item.second);return;}
+  $('replay-video').pause();
   const next=items.find(i=>i.second>=second);
   $('timeline-message').textContent='这个时间没有已知录像。'+(next?'下一段从 '+clockText(next.second)+' 开始，可用「下一段」跳到该录像。':'当天后面没有已知片段。');
 }
 const timelineSlider=$('timeline-seek');
 function selectTimelineTime(second){const text=clockText(second);$('timeline-time').value=text;$('timeline-selected').value=text;timelineSlider.setAttribute('aria-valuetext',text);}
-timelineSlider.addEventListener('pointerdown',event=>{timelineDragging=true;timelinePointer=event.pointerId;$('replay-video').pause();});
-timelineSlider.addEventListener('input',()=>{timelineDragging=true;$('replay-video').pause();selectTimelineTime(Number(timelineSlider.value));});
-timelineSlider.addEventListener('change',()=>{timelineDragging=false;selectTimelineTime(Number(timelineSlider.value));seekTimeline(Number(timelineSlider.value));});
-function finishTimelinePointer(event){if(event.pointerId!==timelinePointer)return;timelinePointer=null;timelineDragging=false;}
-timelineSlider.addEventListener('pointerup',finishTimelinePointer);
-timelineSlider.addEventListener('pointercancel',finishTimelinePointer);
-timelineSlider.addEventListener('blur',()=>{timelineDragging=false;timelinePointer=null;});
+function commitTimelineGesture(){
+  if(timelineCommitted===timelineGesture)return;
+  timelineCommitted=timelineGesture;timelineDragging=false;
+  selectTimelineTime(Number(timelineSlider.value));seekTimeline(Number(timelineSlider.value));
+}
+timelineSlider.addEventListener('pointerdown',event=>{
+  timelineGesture++;timelineDragging=true;timelinePointer=event.pointerId;$('replay-video').pause();
+});
+timelineSlider.addEventListener('input',()=>{
+  if(timelinePointer===null)timelineGesture++;
+  timelineDragging=true;$('replay-video').pause();selectTimelineTime(Number(timelineSlider.value));
+});
+timelineSlider.addEventListener('change',()=>{if(timelinePointer===null)commitTimelineGesture();});
+function finishTimelinePointer(event){
+  if(event.pointerId!==timelinePointer)return;
+  timelinePointer=null;
+  // A release is meaningful even when the native range value did not change.
+  commitTimelineGesture();
+}
+document.addEventListener('pointerup',finishTimelinePointer);
+document.addEventListener('pointercancel',event=>{if(event.pointerId===timelinePointer){timelinePointer=null;timelineDragging=false;timelineCommitted=timelineGesture;}});
+timelineSlider.addEventListener('blur',()=>{if(timelinePointer===null)timelineDragging=false;});
 function stepClip(delta){const second=clockSeconds($('timeline-time').value);const items=timelineData?.items||[];const item=delta>0?items.find(i=>i.second>second):[...items].reverse().find(i=>i.second<second);if(!item){$('timeline-message').textContent=delta>0?'当天没有更晚的已知录像。':'当天没有更早的已知录像。';return;}selectTimelineTime(item.second);timelineCenter=item.second;renderTimeline();chooseTimeline(item,0);}
 $('clip-before').addEventListener('click',()=>stepClip(-1));$('clip-after').addEventListener('click',()=>stepClip(1));
 $('timeline-go').addEventListener('click',()=>{timelineCenter=clockSeconds($('timeline-time').value);renderTimeline();seekTimeline(timelineCenter);});
