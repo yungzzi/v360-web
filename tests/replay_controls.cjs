@@ -37,3 +37,11 @@ test('busy selection keeps latest intent and discards it on a different day',()=
  ctx.chooseTimeline({id:'one',second:1},0);ctx.chooseTimeline({id:'two',second:2},3);assert.equal(calls.length,0);ctx.libraryBusy=false;ctx.flushTimelineSeek();assert.equal(calls.length,1);assert.equal(calls[0][0].id,'two');
  ctx.libraryBusy=true;ctx.chooseTimeline({id:'three',second:3},0);day='2026-11-02';ctx.libraryBusy=false;ctx.flushTimelineSeek();assert.equal(calls.length,1);
 });
+
+test('timeline gaps snap to nearest real interval, ties prefer next',()=>{
+ const chosen=[];const nodes={};const ctx={pendingTimelineSeek:null,timelineData:{items:[{id:'a',second:100,duration_hint:10},{id:'b',second:130,duration_hint:10}]},$:id=>nodes[id] ||= {pause(){},textContent:''},clockText:String,selectTimelineTime(){},renderTimeline(){},chooseTimeline:(i,o)=>chosen.push([i.id,o])};vm.createContext(ctx);
+ vm.runInContext(source.slice(source.indexOf('function seekTimeline('),source.indexOf('const timelineSlider=')),ctx);
+ ctx.seekTimeline(105);ctx.seekTimeline(114);ctx.seekTimeline(120);ctx.seekTimeline(500);
+ assert.deepEqual(chosen,[['a',5],['a',0],['b',0],['b',0]]);
+ ctx.timelineData={items:[]};ctx.seekTimeline(20);assert.equal(chosen.length,4);
+});

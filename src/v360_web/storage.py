@@ -7,7 +7,8 @@ from .backup_policy import BackupPolicy
 from .errors import CameraError
 
 GIB = 1024**3
-ARCHIVE_LIMIT = 10 * GIB
+ARCHIVE_LIMIT = 15 * GIB
+SERVER_TOTAL_LIMIT = 15 * GIB
 CACHE_LIMIT = GIB
 FREE_RESERVE = 8 * GIB
 
@@ -43,6 +44,12 @@ def admit(root: Path, additional: int, kind: str, replacing: Path | None = None)
         if kind == "archive"
         else CACHE_LIMIT
     )
+    if BackupPolicy(root).policy()["mode"] == "server":
+        combined = usage(root / "media") + usage(root / "previews") + usage(root / "live")
+        if combined - previous + additional > SERVER_TOTAL_LIMIT:
+            raise CameraError("storage_limit", "Combined recording budget is full.")
+        if kind == "cache":
+            limit = SERVER_TOTAL_LIMIT
     if used - previous + additional > limit:
         raise CameraError("storage_limit", "Storage budget is full after safe retention checks.")
     if shutil.disk_usage(root).free - max(0, additional - previous) < FREE_RESERVE:
@@ -54,7 +61,13 @@ def summary(root):
         "archive_bytes": usage(root / "media"),
         "archive_limit": min(ARCHIVE_LIMIT, BackupPolicy(root).policy()["archive_limit"]),
         "cache_bytes": usage(root / "previews") + usage(root / "live"),
-        "cache_limit": CACHE_LIMIT,
+        "cache_limit": SERVER_TOTAL_LIMIT
+        if BackupPolicy(root).policy()["mode"] == "server"
+        else CACHE_LIMIT,
+        "combined_bytes": usage(root / "media") + usage(root / "previews") + usage(root / "live"),
+        "combined_limit": SERVER_TOTAL_LIMIT
+        if BackupPolicy(root).policy()["mode"] == "server"
+        else None,
         "free_bytes": shutil.disk_usage(root).free,
         "free_reserve": FREE_RESERVE,
         "automatic_cleanup": True,

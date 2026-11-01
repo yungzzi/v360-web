@@ -59,7 +59,7 @@ class MoveRequest(BaseModel):
 class BackupRequest(BaseModel):
     enabled: bool
     mode: str = Field(pattern=r"^(local|server)$")
-    interval_minutes: int = Field(default=60, ge=15, le=360)
+    interval_minutes: int = Field(default=30, ge=15, le=360)
 
 
 class LoginRequest(BaseModel):
