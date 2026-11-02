@@ -107,6 +107,7 @@ class BackupManager:
             cutoff = (
                 datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None) - timedelta(days=3)
             ).isoformat()
+            cutoff = self.db.read("recovery_floor:" + did, cutoff)
             self.recent_ready_count = sum(day >= cutoff for day in ready_dates)
             self.ready_summary = {
                 "ready": len(ready_dates),
@@ -128,10 +129,13 @@ class BackupManager:
                 "SELECT count(*),coalesce(sum(state!='verified'),0) FROM recordings WHERE device_id=? AND state!='evicted' AND start_local>=?",
                 (
                     did,
-                    (
-                        datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
-                        - timedelta(days=3)
-                    ).isoformat(),
+                    self.db.read(
+                        "recovery_floor:" + did,
+                        (
+                            datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
+                            - timedelta(days=3)
+                        ).isoformat(),
+                    ),
                 ),
             ).fetchone()
         now_local = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
@@ -139,7 +143,12 @@ class BackupManager:
             pending_rows = db.execute(
                 "SELECT id,start_local,duration_raw,error FROM recordings "
                 "WHERE device_id=? AND state!='evicted' AND start_local>=?",
-                (did, (now_local - timedelta(days=3)).isoformat()),
+                (
+                    did,
+                    self.db.read(
+                        "recovery_floor:" + did, (now_local - timedelta(days=3)).isoformat()
+                    ),
+                ),
             ).fetchall()
         waiting = [r for r in pending_rows if r["id"] not in self.ready_ids]
         # Use the declared clip end: an ongoing clip is not overdue.
@@ -215,11 +224,6 @@ class BackupManager:
                 return True
         with self.db.connection() as db:
             row = db.execute("SELECT next_try FROM backup_retries WHERE id=?", (key,)).fetchone()
-        record = self.db.get(key.removeprefix("prepare:"))
-        if row and record and record["error"] in TRANSIENT_ERRORS:
-            # Migrate old hour/day transport backoffs without touching credentials.
-            updated = datetime.fromisoformat(record["updated_at"]).timestamp()
-            return min(row[0], updated + 600) <= now
         return not row or row[0] <= now
 
     def failed(self, key, now, code=None):
@@ -242,6 +246,14 @@ class BackupManager:
             self.cancel = threading.Event()
             if self.stopping.is_set():
                 self.cancel.set()
+        if not self.db.read("transport_retry_migration_v2", False):
+            with self.db.connection() as db:
+                db.execute(
+                    "UPDATE backup_retries SET next_try=min(next_try,?) WHERE id IN "
+                    "(SELECT id FROM recordings WHERE error IN ('sdk_connect','sdk_read','sdk_write','read_timeout'))",
+                    (time.time(),),
+                )
+            self.db.write("transport_retry_migration_v2", True)
         cancellation = progress.cancel_event.set(self.cancel)
         hook = None
         cycle_started = time.monotonic()
@@ -258,7 +270,11 @@ class BackupManager:
 
         def on_progress(value):
             nonlocal charged, current_charged
-            if policy["mode"] == "server" and time.monotonic() - cycle_started > 300:
+            if (
+                policy["mode"] == "server"
+                and value["stage"] in ("connecting", "querying", "downloading")
+                and time.monotonic() - cycle_started > 300
+            ):
                 raise CameraError("backup_yielded", "Automatic work window finished.")
             if value["stage"] == "downloading" and not current_charged:
                 total = value["total"]
@@ -298,6 +314,11 @@ class BackupManager:
             end = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None) - timedelta(
                 seconds=60
             )
+            scope_key = "recovery_floor:" + settings.did
+            scope_floor = self.db.read(scope_key)
+            if policy["mode"] == "server" and scope_floor is None:
+                scope_floor = (end - timedelta(days=3)).isoformat()
+                self.db.write(scope_key, scope_floor)
             local_only = False
             try:
                 result = service.discover(self.config, 0, end - timedelta(hours=24), end)
@@ -320,13 +341,17 @@ class BackupManager:
                     if row["device_id"] == settings.did
                     and row["channel"] == 0
                     and row["state"] != "evicted"
-                    and (not local_only or row["state"] == "verified")
+                    and (not local_only or row["state"] in ("verified", "downloaded_unverified"))
                     and (
                         row["state"] != "verified"
                         or (policy["mode"] == "server" and not playback.ready(self.root, row["id"]))
                     )
                     and row["start_local"]
-                    >= (end - timedelta(days=3 if policy["mode"] == "server" else 30)).isoformat()
+                    >= (
+                        scope_floor
+                        if policy["mode"] == "server"
+                        else (end - timedelta(days=30)).isoformat()
+                    )
                     and row["start_local"] <= end.isoformat()
                     and (
                         policy["mode"] != "server"
@@ -338,7 +363,16 @@ class BackupManager:
                         ("prepare:" if row["state"] == "verified" else "") + row["id"], time.time()
                     )
                 ]
-                return sorted(rows, key=lambda row: row["start_local"], reverse=True)
+                ordered = sorted(rows, key=lambda row: row["start_local"], reverse=True)
+                if policy["mode"] != "server":
+                    return ordered
+                # Alternate newest and oldest: continuous new clips cannot starve recovery.
+                fair = []
+                while ordered:
+                    fair.append(ordered.pop(0))
+                    if ordered:
+                        fair.append(ordered.pop())
+                return fair
 
             rows = candidates()
             # Only query one older day when the recent queue leaves room this round.
@@ -399,8 +433,12 @@ class BackupManager:
                 current_charged = False
                 try:
                     if row["state"] != "verified":
-                        service.download(self.config, row["id"])
-                        downloaded += 1
+                        if local_only:
+                            service.download(self.config, row["id"], local_only=True)
+                        else:
+                            result = service.download(self.config, row["id"])
+                            if not result or not result.get("rechecked_local_file"):
+                                downloaded += 1
                     if policy["mode"] == "server":
                         progress.check_cancelled()
                         playback.prepare(self.config, row["id"])

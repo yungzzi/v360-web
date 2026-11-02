@@ -101,3 +101,19 @@ preparation that round. Server mode now catches transient catalog transport erro
 and continues preparing already verified originals without another camera request.
 Authentication failures still stop the cycle. UI explicitly reports this degraded
 mode. Catalog completeness is preserved, never inferred from an offline cycle.
+
+
+## 2026-11-02 durable recovery follow-up
+
+Catalog refresh overwrites recording.updated_at, so it cannot serve as a retry
+clock. One persisted v2 migration releases existing transport backoffs once;
+subsequent failures use backup_retries.next_try directly. Recovery stores a fixed
+initial three-day floor per device; unfinished indexed clips do not disappear
+when they become four days old. Candidate order alternates newest and oldest.
+Transport setup retries at most five times within a forty-second exchange budget,
+with cancellation between attempts; authentication is never retried. Local-only
+cycles also validate downloaded_unverified files, with a strict no-network
+fallback flag. A started local conversion can finish past the five-minute round
+boundary; cancellation and individual conversion timeout remain effective.
+These changes require real failed-file download acceptance, separately from
+existing-original conversion and automated checks.

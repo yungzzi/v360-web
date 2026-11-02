@@ -183,3 +183,21 @@ def test_bridge_will_not_expose_credentials_to_non_loopback_address():
     with pytest.raises(CameraError) as error:
         AndroidBridge("192.168.1.2", 8766, TOKEN)
     assert error.value.code == "bridge_address"
+
+
+@pytest.mark.parametrize(
+    "mode,expected", [("connect-timeout-three", 4), ("connect-timeout-always", 5)]
+)
+def test_bounded_transport_recovery_before_login(bridge_server, monkeypatch, mode, expected):
+    monkeypatch.setattr("v360_web.client.time.sleep", lambda _: None)
+    with bridge_server(mode) as (port, state):
+        if mode.endswith("always"):
+            with pytest.raises(CameraError) as exc, CameraClient(settings(port)):
+                pass
+            assert exc.value.code == "sdk_connect"
+            assert not state["writes"]
+        else:
+            with CameraClient(settings(port)):
+                pass
+            assert len(state["writes"]) == 1
+        assert state["connect_calls"] == expected

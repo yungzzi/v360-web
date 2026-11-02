@@ -34,7 +34,7 @@ def discover(config_path: Path, channel: int, start: datetime, end: datetime):
     }
 
 
-def download(config_path: Path, key: str):
+def download(config_path: Path, key: str, *, local_only=False):
     settings = Settings.load(config_path)
     store = RecordingStore(settings.data_root)
     item = store.get(key)
@@ -61,6 +61,11 @@ def download(config_path: Path, key: str):
                 validate_decode(local)
                 store.update(key, "verified", error=None)
                 return {"id": key, "state": "verified", "rechecked_local_file": True}
+    if local_only:
+        raise CameraError(
+            "local_original_invalid",
+            "Local original cannot be validated without fetching it again.",
+        )
     temporary = store.root / "media" / f"{key}.part"
     last_report = 0
 

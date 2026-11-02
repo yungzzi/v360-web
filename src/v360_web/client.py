@@ -10,7 +10,7 @@ from . import protocol as wire
 from .bridge import create_bridge
 from .config import Settings
 from .errors import CameraError
-from .progress import cancel_event, check_cancelled
+from .progress import cancel_event, check_cancelled, report
 
 
 class CameraClient:
@@ -32,18 +32,32 @@ class CameraClient:
         try:
             self.bridge.open()
             self.bridge.initialize(self.settings.sdk_init)
-            for attempt in range(2):
+            transport_timeout = getattr(self.bridge, "timeout", 40)
+            connect_deadline = time.monotonic() + 40
+            for attempt in range(5):
                 check_cancelled()
+                self.bridge.timeout = min(
+                    transport_timeout, max(0.1, connect_deadline - time.monotonic())
+                )
                 try:
                     self.session = self.bridge.connect(
                         self.settings.did, self.settings.connect_mode, self.settings.server_key
                     )
                     break
                 except CameraError as error:
-                    if error.code != "sdk_connect" or error.sdk_code != -3 or attempt:
+                    report("connecting", attempt=attempt + 1, sdk_code=error.sdk_code)
+                    if (
+                        error.code != "sdk_connect"
+                        or error.sdk_code != -3
+                        or attempt == 4
+                        or time.monotonic() + 1 >= connect_deadline
+                    ):
                         raise
-                    # Retry only transport setup, before sending any login command.
-                    time.sleep(1)
+                    # Only retry transport, never repeat a rejected device login.
+                    for _ in range(5):
+                        check_cancelled()
+                        time.sleep(0.2)
+            self.bridge.timeout = transport_timeout
             self.send(
                 wire.LOGIN,
                 wire.login_payload(

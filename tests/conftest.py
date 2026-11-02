@@ -71,7 +71,14 @@ def bridge_server(media_bytes):
                             answer = {"ok": True, "ret": 0}
                             if op == "connect":
                                 state["connect_calls"] += 1
-                                if mode == "connect-timeout-once" and state["connect_calls"] == 1:
+                                if (
+                                    (mode == "connect-timeout-once" and state["connect_calls"] == 1)
+                                    or (
+                                        mode == "connect-timeout-three"
+                                        and state["connect_calls"] <= 3
+                                    )
+                                    or mode == "connect-timeout-always"
+                                ):
                                     answer = {"ok": False, "error": "sdk_connect", "ret": -3}
                                 else:
                                     answer["session"] = 7

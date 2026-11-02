@@ -490,10 +490,12 @@ def test_connection_outage_stops_batch_and_shortens_legacy_backoff(tmp_path, mon
     assert backup.snapshot()["last_file_sdk_code"] == -3
     assert not backup.retry_ready(keys[0], time.time())
     assert backup.retry_ready(keys[0], time.time() + 601)
-    # Previously accumulated one-day backoff must not keep transport failures stuck.
+    # New retry deadlines are independent of mutable catalog timestamps.
     with backup.db.connection() as db:
-        db.execute("UPDATE backup_retries SET next_try=? WHERE id=?", (time.time()+86400, keys[0]))
-    assert backup.retry_ready(keys[0], time.time() + 601)
+        db.execute(
+            "UPDATE backup_retries SET next_try=? WHERE id=?", (time.time() + 86400, keys[0])
+        )
+    assert not backup.retry_ready(keys[0], time.time() + 601)
     assert RecordingStore(tmp_path).get(keys[1])["state"] == "discovered"
 
 
@@ -526,3 +528,34 @@ def test_catalog_outage_still_prepares_local_originals(tmp_path, monkeypatch):
     assert prepared == [local]
     assert backup.snapshot()["catalog_error"] == "sdk_connect"
     assert backup.snapshot()["last_prepared"] == 1
+
+
+def test_legacy_retry_migration_survives_catalog_refresh(tmp_path, monkeypatch):
+    key, _ = record(tmp_path, state="failed")
+    store = RecordingStore(tmp_path)
+    store.update(key, "failed", error="sdk_connect")
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    with backup.db.connection() as db:
+        db.execute("INSERT INTO backup_retries VALUES (?,?,?)", (key, 5, time.time() + 86400))
+    calls = []
+    monkeypatch.setattr(service, "download", lambda cfg, ident: calls.append(ident))
+    backup.cycle()
+    assert calls == [key]
+    assert backup.db.read("transport_retry_migration_v2") is True
+
+
+def test_fixed_recovery_scope_and_fair_order(tmp_path, monkeypatch):
+    keys = [record(tmp_path, n, state="discovered")[0] for n in (0, 10, 20, 30)]
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    backup.db.write("recovery_floor:test-device", "2026-01-01T00:00:00")
+    with backup.db.connection() as db:
+        db.execute(
+            "UPDATE recordings SET start_local=? WHERE id=?",
+            ((datetime.now() - timedelta(days=4)).isoformat(), keys[-1]),
+        )
+    calls = []
+    monkeypatch.setattr(service, "download", lambda cfg, key: calls.append(key))
+    backup.cycle()
+    assert calls == [keys[0], keys[3], keys[1], keys[2]]
