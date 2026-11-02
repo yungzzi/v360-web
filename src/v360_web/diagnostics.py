@@ -8,7 +8,7 @@ import time
 def record(root, stage, **values):
     if root is None:
         return
-    allowed = {"attempt", "elapsed", "sdk_code", "error", "ok", "key", "forced"}
+    allowed = {"attempt", "elapsed", "sdk_code", "error", "ok", "key", "forced", "download_header"}
     safe = {k: v for k, v in values.items() if k in allowed}
     try:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)

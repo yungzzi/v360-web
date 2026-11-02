@@ -189,6 +189,11 @@ class CameraClient:
         response = self.response(
             wire.DOWNLOAD_RESPONSE, time.monotonic() + self.settings.request_timeout
         )
+        record(
+            getattr(self.settings, "data_root", None),
+            "download_response",
+            download_header=response[:40].hex(),
+        )
         expected, actual_start, _, _, _ = wire.parse_download_response(response)
         if actual_start != start or expected > 2 * 1024**3:
             raise CameraError(
