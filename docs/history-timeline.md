@@ -117,3 +117,15 @@ fallback flag. A started local conversion can finish past the five-minute round
 boundary; cancellation and individual conversion timeout remain effective.
 These changes require real failed-file download acceptance, separately from
 existing-original conversion and automated checks.
+
+
+Production candidate aa1b641 / docker.17 was deployed for bounded acceptance.
+169 Python checks and 7 JavaScript checks pass. Of three preselected November 2
+sdk_connect failures, 03:59:07 and 09:20:59 were newly downloaded, fully validated,
+converted, and served via authenticated MP4 range requests (206, 1024 bytes).
+00:37:17 still failed after five connection attempts with SDK -3. Thus this is
+partial recovery evidence, not reliable unattended download acceptance. Request
+an original-App open/close comparison to investigate low-power connectivity;
+no assumption that an omitted wake API exists. Feature remains unmerged pending
+further connection diagnosis. Private server records: recovery-targets-20261102.json
+and recovery-three-results-20261102.json under backups/.
