@@ -79,7 +79,7 @@ class BackupManager:
             r
             for r in self.db.list()
             if r["device_id"] == did
-            and r["state"] == "verified"
+            and r["state"] in ("verified", "downloaded_unverified")
             and r["start_local"] >= floor
             and not playback.ready(self.root, r["id"])
             and self.retry_ready("prepare:" + r["id"], time.time())
@@ -105,6 +105,8 @@ class BackupManager:
         shutdown = progress.shutdown_event.set(self.stopping)
         try:
             self.update(prepare_state="running")
+            if (self.db.get(key) or {}).get("state") == "downloaded_unverified":
+                service.download(self.config, key, local_only=True)
             playback.prepare(self.config, key)
             self.ready_summary_until = 0
             with self.db.connection() as db:
@@ -341,6 +343,7 @@ class BackupManager:
         if accounting["day"] != day:
             accounting = {"day": day, "bytes": 0}
         current_charged = False
+        batch = service.DownloadBatch(self.config) if self.prepare_thread is not None else None
 
         def on_progress(value):
             nonlocal charged, current_charged
@@ -430,7 +433,10 @@ class BackupManager:
                     if row["device_id"] == settings.did
                     and row["channel"] == 0
                     and row["state"] != "evicted"
-                    and not (self.prepare_thread is not None and row["state"] == "verified")
+                    and not (
+                        self.prepare_thread is not None
+                        and row["state"] in ("verified", "downloaded_unverified")
+                    )
                     and (not local_only or row["state"] in ("verified", "downloaded_unverified"))
                     and (
                         row["state"] != "verified"
@@ -543,16 +549,24 @@ class BackupManager:
                 current_charged = False
                 try:
                     if row["state"] != "verified":
-                        if local_only:
+                        if local_only or (
+                            batch is not None and row["state"] == "downloaded_unverified"
+                        ):
                             service.download(self.config, row["id"], local_only=True)
                         else:
-                            result = service.download(self.config, row["id"])
+                            result = (
+                                batch.download(row["id"])
+                                if batch is not None
+                                else service.download(self.config, row["id"])
+                            )
                             if not result or not result.get("rechecked_local_file"):
                                 downloaded += 1
                         if self.prepare_thread is not None:
                             ahead = self.db.read("download_ahead", [])
-                            if row["id"] not in ahead:
-                                self.db.write("download_ahead", ahead + [row["id"]])
+                            with self.guard:
+                                ahead = self.db.read("download_ahead", [])
+                                if row["id"] not in ahead:
+                                    self.db.write("download_ahead", ahead + [row["id"]])
                     if policy["mode"] == "server" and self.prepare_thread is None:
                         progress.check_cancelled()
                         playback.prepare(self.config, row["id"])
@@ -615,6 +629,8 @@ class BackupManager:
             self.update(state="failed", error="backup_failed")
             self.jobs.update_job(job_id, state="failed", error="backup_failed")
         finally:
+            if batch is not None:
+                batch.close()
             progress.callback.reset(hook)
             progress.cancel_event.reset(cancellation)
             with self.guard:

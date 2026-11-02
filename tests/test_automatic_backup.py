@@ -613,6 +613,11 @@ def test_download_prefetch_bounds_survive_restart(tmp_path, monkeypatch):
         RecordingStore(tmp_path).update(key, "verified")
 
     monkeypatch.setattr(service, "download", save)
+    monkeypatch.setattr(
+        service,
+        "DownloadBatch",
+        lambda config: SimpleNamespace(download=lambda key: save(config, key), close=lambda: None),
+    )
     backup.cycle()
     assert len(calls) == 3
     assert len(backup.db.read("download_ahead")) == 3

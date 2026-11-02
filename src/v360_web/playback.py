@@ -10,6 +10,7 @@ from functools import wraps
 from pathlib import Path
 
 from .config import Settings, read_private_json, write_private_json
+from .diagnostics import record
 from .errors import CameraError
 from .maintenance import cleanup, protect
 from .media import find_tool, probe, validate_decode
@@ -81,6 +82,7 @@ def prepare(config: Path, key: str, start=None):
     if start is not None and ready(root, key, start):
         _, manifest, _ = paths(root, key, start)
         return {"id": key, "state": "ready", **read_private_json(manifest), "full": False}
+    record(root, "prepare_started", key=key)
     report("preparing_playback")
     protect(root, key)
     info = probe(source)
@@ -233,6 +235,7 @@ def prepare(config: Path, key: str, start=None):
         },
     )
     temporary_manifest.replace(manifest)
+    record(root, "web_ready", key=key, ok=True)
     return {
         "id": key,
         "state": "ready",

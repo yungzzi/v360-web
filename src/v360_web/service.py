@@ -1,10 +1,12 @@
 import hashlib
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
 from .client import CameraClient
 from .config import Settings
+from .diagnostics import record
 from .errors import CameraError
 from .maintenance import cleanup
 from .media import probe, validate_decode
@@ -34,7 +36,7 @@ def discover(config_path: Path, channel: int, start: datetime, end: datetime):
     }
 
 
-def download(config_path: Path, key: str, *, local_only=False):
+def download(config_path: Path, key: str, *, local_only=False, camera=None, defer_validation=False):
     settings = Settings.load(config_path)
     store = RecordingStore(settings.data_root)
     item = store.get(key)
@@ -88,8 +90,8 @@ def download(config_path: Path, key: str, *, local_only=False):
     report("connecting")
     store.update(key, "downloading", error=None)
     try:
-        with CameraClient(settings) as camera:
-            result = camera.download(
+        with nullcontext(camera) if camera is not None else CameraClient(settings) as peer:
+            result = peer.download(
                 item["channel"],
                 datetime.fromisoformat(item["start_local"]),
                 temporary,
@@ -105,6 +107,9 @@ def download(config_path: Path, key: str, *, local_only=False):
             path=str(destination.relative_to(store.root)),
             **{k: result[k] for k in ["bytes", "sha256"]},
         )
+        record(store.root, "downloaded", key=key, ok=True)
+        if defer_validation:
+            return {"id": key, "state": "downloaded_unverified", **result}
         info = probe(destination)
         report("validating")
         validate_decode(destination)
@@ -128,3 +133,44 @@ def download(config_path: Path, key: str, *, local_only=False):
         raise CameraError(
             "local_storage", "Could not write or finalize the local recording."
         ) from error
+
+
+class DownloadBatch:
+    """Own one short camera session; published raw files validate independently."""
+
+    def __init__(self, config):
+        self.config = config
+        self.camera = None
+        self.count = 0
+        self.started = 0
+
+    def close(self):
+        if self.camera is not None:
+            self.camera.close()
+            self.camera = None
+        self.count = 0
+
+    def download(self, key):
+        settings = Settings.load(self.config)
+        try:
+            if self.camera is not None and (
+                self.count >= 3 or time.monotonic() - self.started >= 120
+            ):
+                self.close()
+            if self.camera is None:
+                self.camera = CameraClient(settings)
+                self.camera.__enter__()
+                self.started = time.monotonic()
+            result = download(self.config, key, camera=self.camera, defer_validation=True)
+            self.count += 1
+            if self.count >= 3:
+                self.close()
+            return result
+        except BaseException as error:
+            self.close()
+            if isinstance(error, CameraError):
+                store = RecordingStore(settings.data_root)
+                item = store.get(key)
+                if item and item["state"] != "downloaded_unverified":
+                    store.update(key, "failed", error=error.code)
+            raise

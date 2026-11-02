@@ -9,6 +9,7 @@ from pathlib import Path
 from . import protocol as wire
 from .bridge import create_bridge
 from .config import Settings
+from .diagnostics import record
 from .errors import CameraError
 from .progress import cancel_event, check_cancelled, report
 
@@ -39,12 +40,29 @@ class CameraClient:
                 self.bridge.timeout = min(
                     transport_timeout, max(0.1, connect_deadline - time.monotonic())
                 )
+                attempt_started = time.monotonic()
                 try:
                     self.session = self.bridge.connect(
                         self.settings.did, self.settings.connect_mode, self.settings.server_key
                     )
+                    record(
+                        getattr(self.settings, "data_root", None),
+                        "connection",
+                        attempt=attempt + 1,
+                        elapsed=round(time.monotonic() - attempt_started, 3),
+                        ok=True,
+                    )
                     break
                 except CameraError as error:
+                    record(
+                        getattr(self.settings, "data_root", None),
+                        "connection",
+                        attempt=attempt + 1,
+                        elapsed=round(time.monotonic() - attempt_started, 3),
+                        ok=False,
+                        error=error.code,
+                        sdk_code=error.sdk_code,
+                    )
                     report("connecting", attempt=attempt + 1, sdk_code=error.sdk_code)
                     if (
                         error.code != "sdk_connect"
@@ -69,9 +87,16 @@ class CameraClient:
                 raise CameraError("login_response", "Device login response is truncated.")
             result = struct.unpack_from("<i", payload)[0]
             if result:
+                record(
+                    getattr(self.settings, "data_root", None),
+                    "authentication",
+                    ok=False,
+                    sdk_code=result,
+                )
                 raise CameraError(
                     "device_authentication", "Device did not accept its credentials.", result
                 )
+            record(getattr(self.settings, "data_root", None), "authentication", ok=True)
             return self
         except BaseException:
             self.close()
@@ -90,6 +115,11 @@ class CameraClient:
         finally:
             self.session = None
             self.bridge.close()
+            record(
+                getattr(self.settings, "data_root", None),
+                "closed",
+                forced=bool((getattr(self.bridge, "last_cleanup", None) or {}).get("forced")),
+            )
 
     def send(self, command: int, payload: bytes):
         self.bridge.write(
