@@ -1,7 +1,9 @@
 """Authenticated, bounded read-only storage and SD-playback diagnostics."""
 
 import base64
+import hashlib
 import struct
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -9,6 +11,7 @@ from datetime import datetime
 from .client import CameraClient
 from .config import Settings
 from .errors import CameraError
+from .media import find_tool
 from .protocol import encode_time
 from .store import RecordingStore
 
@@ -31,7 +34,7 @@ def storage_status(config):
     }
 
 
-def playback_probe(config, key, stream_type=None):
+def playback_probe(config, key, stream_type=None, capture=False):
     settings = Settings.load(config)
     item = RecordingStore(settings.data_root).get(key)
     if not item or item["device_id"] != settings.did:
@@ -113,8 +116,53 @@ def playback_probe(config, key, stream_type=None):
                     frame_pts=pts,
                     frame_type=kind,
                 )
-        except CameraError as error:
-            result.update(probe_error=error.code, phase=phase, sdk_code=error.sdk_code)
+                if capture and 0 < size <= 2 * 1024**2:
+                    if kind == 16384:
+                        ext = camera.bridge.read_exact(
+                            camera.session, frame_channel[0], 16, time.monotonic() + 10
+                        )
+                        kind = struct.unpack_from("<I", ext)[0]
+                    content = camera.bridge.read_exact(
+                        camera.session, frame_channel[0], size, time.monotonic() + 15
+                    )
+                    if kind not in (1, 17) or not content.startswith((b"\0\0\1", b"\0\0\0\1")):
+                        raise CameraError(
+                            "sd_probe_format", "First SD frame is not a supported key frame."
+                        )
+                    folder = settings.data_root / "protocol-diagnostics" / "sd-frame"
+                    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    name = hashlib.sha256(key.encode()).hexdigest()[:32]
+                    raw = folder / (name + (".hevc" if kind == 17 else ".h264"))
+                    raw.write_bytes(content)
+                    raw.chmod(0o600)
+                    picture = folder / (name + ".jpg")
+                    converted = subprocess.run(
+                        [
+                            find_tool("ffmpeg"),
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-y",
+                            "-i",
+                            str(raw),
+                            "-frames:v",
+                            "1",
+                            str(picture),
+                        ],
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    result["frame_decoded"] = converted.returncode == 0 and picture.is_file()
+                    if result["frame_decoded"]:
+                        picture.chmod(0o600)
+                        result["diagnostic_picture"] = str(picture.relative_to(settings.data_root))
+        except (CameraError, subprocess.TimeoutExpired) as error:
+            result.update(
+                probe_error=getattr(error, "code", "sd_probe_decode_timeout"),
+                phase=phase,
+                sdk_code=getattr(error, "sdk_code", None),
+            )
         finally:
             halt.set()
             reader.join(timeout=2)
