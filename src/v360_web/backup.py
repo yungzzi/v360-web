@@ -14,6 +14,8 @@ from .errors import CameraError
 from .jobs import JobStore
 from .maintenance import cleanup
 
+TRANSIENT_ERRORS = {"sdk_connect", "sdk_read", "sdk_write", "read_timeout"}
+
 
 class BackupManager:
     def __init__(self, root, config, camera_lock):
@@ -77,6 +79,7 @@ class BackupManager:
             ).fetchone()[0]
         if time.monotonic() >= self.ready_summary_until:
             ready_dates = []
+            ready_ids = set()
             with self.db.connection() as db:
                 rows = db.execute(
                     "SELECT id,start_local,sha256,path FROM recordings WHERE device_id=? AND state='verified'",
@@ -96,8 +99,10 @@ class BackupManager:
                         and (self.root / row["path"]).is_file()
                     ):
                         ready_dates.append(row["start_local"])
+                        ready_ids.add(row["id"])
                 except (OSError, ValueError):
                     continue
+            self.ready_ids = ready_ids
             ready_dates.sort()
             cutoff = (
                 datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None) - timedelta(days=3)
@@ -129,7 +134,25 @@ class BackupManager:
                     ).isoformat(),
                 ),
             ).fetchone()
+        now_local = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
+        with self.db.connection() as db:
+            pending_rows = db.execute(
+                "SELECT id,start_local,duration_raw,error FROM recordings "
+                "WHERE device_id=? AND state!='evicted' AND start_local>=?",
+                (did, (now_local - timedelta(days=3)).isoformat()),
+            ).fetchall()
+        waiting = [r for r in pending_rows if r["id"] not in self.ready_ids]
+        # Use the declared clip end: an ongoing clip is not overdue.
+        overdue = sum(
+            datetime.fromisoformat(r["start_local"])
+            + timedelta(seconds=max(0, min(r["duration_raw"], 3600)))
+            < now_local - timedelta(minutes=30)
+            for r in waiting
+        )
         return {
+            "recent_pending": len(waiting) - overdue,
+            "overdue_pending": overdue,
+            "retry_pending": sum(bool(r["error"]) for r in waiting),
             **self.ready_summary,
             "awaiting_playback": max(0, in_scope[0] - self.recent_ready_count),
             "pending_in_scope": in_scope[1],
@@ -192,13 +215,18 @@ class BackupManager:
                 return True
         with self.db.connection() as db:
             row = db.execute("SELECT next_try FROM backup_retries WHERE id=?", (key,)).fetchone()
+        record = self.db.get(key.removeprefix("prepare:"))
+        if row and record and record["error"] in TRANSIENT_ERRORS:
+            # Migrate old hour/day transport backoffs without touching credentials.
+            updated = datetime.fromisoformat(record["updated_at"]).timestamp()
+            return min(row[0], updated + 600) <= now
         return not row or row[0] <= now
 
-    def failed(self, key, now):
+    def failed(self, key, now, code=None):
         with self.db.connection() as db:
             row = db.execute("SELECT attempts FROM backup_retries WHERE id=?", (key,)).fetchone()
             attempts = (row[0] if row else 0) + 1
-            delay = 3600 if attempts < 3 else 86400
+            delay = 600 if code in TRANSIENT_ERRORS else (3600 if attempts < 3 else 86400)
             db.execute(
                 "INSERT OR REPLACE INTO backup_retries VALUES (?,?,?)", (key, attempts, now + delay)
             )
@@ -386,8 +414,12 @@ class BackupManager:
                         )
                         + row["id"],
                         time.time(),
+                        error.code,
                     )
-                    self.update(last_file_error=error.code)
+                    self.update(last_file_error=error.code, last_file_sdk_code=error.sdk_code)
+                    if error.code == "sdk_connect":
+                        # Device-wide outage: do not label every other file as failed.
+                        break
                     if error.code == "backup_budget":
                         break
             self.update(last_prepared=prepared)
