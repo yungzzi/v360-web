@@ -15,16 +15,22 @@ from .storage import admit, check_free
 from .store import RecordingStore
 
 
-def discover(config_path: Path, channel: int, start: datetime, end: datetime):
+def discover(config_path: Path, channel: int, start: datetime, end: datetime, prime_calendar=False):
     settings = Settings.load(config_path)
     report("querying")
     with CameraClient(settings) as camera:
+        calendar = {}
+        if prime_calendar:
+            from .camera_probe import monthly_index
+
+            calendar = monthly_index(camera, start.year, start.month, channel)
         events = camera.list_recordings(channel, start, end)
     store = RecordingStore(settings.data_root)
     keys = store.discover(settings.did, channel, events)
     diagnostics = camera.last_list_diagnostics
     store.save_catalog(settings.did, start, end, diagnostics)
     return {
+        **calendar,
         "records": len(keys),
         "ids": keys,
         "camera_validation": (

@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .client import CameraClient
 from .config import Settings
@@ -16,11 +17,28 @@ from .protocol import encode_time
 from .store import RecordingStore
 
 
+def monthly_index(camera, year, month, channel=0):
+    # LiveViewModel.getMonthFlag(year, month, channel) selects physical SD disk 1.
+    camera.send(1287, struct.pack("<4I", 1, year, month, channel))
+    payload = camera.response(1288, time.monotonic() + camera.settings.request_timeout)
+    if len(payload) < 36:
+        raise CameraError("sd_calendar_response", "SD monthly directory response is truncated.")
+    return {
+        "disk_flag": struct.unpack_from("<I", payload)[0],
+        "calendar_flags": list(payload[4:36]),
+    }
+
+
 def storage_status(config):
     settings = Settings.load(config)
     with CameraClient(settings) as camera:
         camera.send(816, bytes(4))
         payload = camera.response(817, time.monotonic() + settings.request_timeout)
+        now = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+        try:
+            calendar = monthly_index(camera, now.year, now.month)
+        except CameraError as error:
+            calendar = {"calendar_error": error.code}
     if len(payload) < 56:
         raise CameraError("storage_response", "Storage response is truncated.")
     total, free = struct.unpack_from("<ii", payload, 40)
@@ -31,6 +49,7 @@ def storage_status(config):
         "has_card": total > 0,
         "anomaly": total < 0,
         "file_download_supported": bool(flags & 8),
+        **calendar,
     }
 
 

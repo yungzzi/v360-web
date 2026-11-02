@@ -12,6 +12,7 @@ class Peer:
         self.reply = reply
         self.sent = []
         self.session = 1
+        self.settings = SimpleNamespace(request_timeout=1)
         self.bridge = SimpleNamespace(rpc=lambda *args, **kwargs: {"ret": -3, "data": ""})
 
     def __enter__(self):
@@ -45,7 +46,8 @@ def test_storage_response_handles_card_fault_without_formatting(monkeypatch):
     setup(monkeypatch, peer)
     result = camera_probe.storage_status(None)
     assert result["anomaly"] and not result["has_card"]
-    assert peer.sent == [(816, bytes(4))]
+    assert peer.sent[0] == (816, bytes(4))
+    assert peer.sent[1][0] == 1287
 
 
 def test_rejected_sd_probe_always_stops_and_keeps_auth_fields(monkeypatch):

@@ -51,6 +51,7 @@ from .streaming import StreamManager
 
 
 class ListRequest(BaseModel):
+    prime_calendar: bool = False
     channel: int = Field(ge=0, le=255)
     start: datetime
     end: datetime
@@ -608,7 +609,7 @@ def create_app(
             raise HTTPException(
                 422, "Use an ordered range of device-local times without UTC offsets"
             )
-        return submit(service.discover, body.channel, body.start, body.end)
+        return submit(service.discover, body.channel, body.start, body.end, body.prime_calendar)
 
     @app.post("/api/jobs/storage-check", status_code=202, dependencies=[Depends(authorize)])
     def storage_check_job():
