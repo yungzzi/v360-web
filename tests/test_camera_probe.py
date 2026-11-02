@@ -11,6 +11,8 @@ class Peer:
     def __init__(self, reply):
         self.reply = reply
         self.sent = []
+        self.session = 1
+        self.bridge = SimpleNamespace(rpc=lambda *args, **kwargs: {"ret": -3, "data": ""})
 
     def __enter__(self):
         return self
@@ -69,3 +71,41 @@ def test_storage_truncation_is_not_reported_healthy(monkeypatch):
     setup(monkeypatch, Peer(bytes(48)))
     with pytest.raises(CameraError, match="truncated"):
         camera_probe.storage_status(None)
+
+
+def test_probe_receives_frame_when_reader_precedes_start(monkeypatch):
+    import base64
+    import threading
+
+    started = threading.Event()
+    peer = Peer(struct.pack("<iihBB", 16, 0, 15, 0, 0))
+    original_send = peer.send
+
+    def send(cmd, data):
+        original_send(cmd, data)
+        if struct.unpack_from("<I", data, 4)[0] == 16:
+            started.set()
+
+    peer.send = send
+    header = struct.pack("<4I", 428213528, 1234, 1793620000, 16384)
+
+    def read(*args, **kwargs):
+        if not started.wait(0.05):
+            return {"ret": -3, "data": ""}
+        return {"ret": 0, "data": base64.b64encode(header).decode()}
+
+    peer.bridge.rpc = read
+    setup(monkeypatch, peer)
+    item = {
+        "device_id": "test",
+        "channel": 0,
+        "event_type": 0,
+        "start_local": "2026-11-02T12:00:00",
+        "weekday": 1,
+    }
+    monkeypatch.setattr(
+        camera_probe, "RecordingStore", lambda _: SimpleNamespace(get=lambda key: item)
+    )
+    result = camera_probe.playback_probe(None, "key")
+    assert result["frame_size"] == 1234 and result["stop_requested"]
+    assert "probe_error" not in result
