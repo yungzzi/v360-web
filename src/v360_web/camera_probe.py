@@ -29,7 +29,7 @@ def storage_status(config):
     }
 
 
-def playback_probe(config, key):
+def playback_probe(config, key, stream_type=2):
     settings = Settings.load(config)
     item = RecordingStore(settings.data_root).get(key)
     if not item or item["device_id"] != settings.did:
@@ -37,7 +37,7 @@ def playback_probe(config, key):
     payload = bytearray(
         struct.pack("<III", item["channel"], 16, 0)
         + encode_time(datetime.fromisoformat(item["start_local"]), item["weekday"])
-        + bytes([2, 0, 0, 0])
+        + bytes([stream_type, 0, 0, 0])
     )
     struct.pack_into("<H", payload, 22, (0 if settings.shared else settings.user_id) & 0xFFFF)
     result = {}
@@ -54,7 +54,7 @@ def playback_probe(config, key):
             )
             if command == 16 and code == 0:
                 phase = "first_frame"
-                head = camera.bridge.read_exact(camera.session, 3, 16, time.monotonic() + 5)
+                head = camera.bridge.read_exact(camera.session, 3, 16, time.monotonic() + 15)
                 flag, size, pts, kind = struct.unpack("<4I", head)
                 result.update(frame_flag=flag, frame_size=size, frame_pts=pts, frame_type=kind)
         except CameraError as error:
