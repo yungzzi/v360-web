@@ -298,10 +298,20 @@ class BackupManager:
             end = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None) - timedelta(
                 seconds=60
             )
-            result = service.discover(self.config, 0, end - timedelta(hours=24), end)
-            self.update(
-                metadata_complete=result["metadata_complete"], queried_records=result["records"]
-            )
+            local_only = False
+            try:
+                result = service.discover(self.config, 0, end - timedelta(hours=24), end)
+            except CameraError as error:
+                if policy["mode"] != "server" or error.code not in TRANSIENT_ERRORS:
+                    raise
+                local_only = True
+                self.update(catalog_error=error.code, last_file_sdk_code=error.sdk_code)
+            else:
+                self.update(
+                    metadata_complete=result["metadata_complete"],
+                    queried_records=result["records"],
+                    catalog_error=None,
+                )
 
             def candidates():
                 rows = [
@@ -310,6 +320,7 @@ class BackupManager:
                     if row["device_id"] == settings.did
                     and row["channel"] == 0
                     and row["state"] != "evicted"
+                    and (not local_only or row["state"] == "verified")
                     and (
                         row["state"] != "verified"
                         or (policy["mode"] == "server" and not playback.ready(self.root, row["id"]))
@@ -332,7 +343,7 @@ class BackupManager:
             rows = candidates()
             # Only query one older day when the recent queue leaves room this round.
             # Cursor is persisted after a successful query; failures retry the same day.
-            if policy["mode"] == "server" and not rows:
+            if policy["mode"] == "server" and not rows and not local_only:
                 progress.check_cancelled()
                 cursor_key = "backfill3:" + settings.did
                 cursor = self.db.read(cursor_key, {})
