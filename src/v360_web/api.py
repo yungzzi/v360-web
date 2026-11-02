@@ -29,7 +29,17 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from . import __version__, battery, live, maintenance, playback, progress, service, storage
+from . import (
+    __version__,
+    battery,
+    camera_probe,
+    live,
+    maintenance,
+    playback,
+    progress,
+    service,
+    storage,
+)
 from .backup import BackupManager
 from .config import Settings
 from .errors import CameraError
@@ -599,6 +609,14 @@ def create_app(
                 422, "Use an ordered range of device-local times without UTC offsets"
             )
         return submit(service.discover, body.channel, body.start, body.end)
+
+    @app.post("/api/jobs/storage-check", status_code=202, dependencies=[Depends(authorize)])
+    def storage_check_job():
+        return submit(camera_probe.storage_status)
+
+    @app.post("/api/jobs/sd-probe/{key}", status_code=202, dependencies=[Depends(authorize)])
+    def sd_probe_job(key: str):
+        return submit(camera_probe.playback_probe, key)
 
     @app.post("/api/jobs/download/{key}", status_code=202, dependencies=[Depends(authorize)])
     def download_job(key: str):

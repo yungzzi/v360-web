@@ -235,7 +235,9 @@ def prepare(config: Path, key: str, start=None):
         },
     )
     temporary_manifest.replace(manifest)
-    record(root, "web_ready", key=key, ok=True)
+    if start is None:
+        store.mark_web_ready(key)
+        record(root, "web_ready", key=key, ok=True)
     return {
         "id": key,
         "state": "ready",

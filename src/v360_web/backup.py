@@ -594,7 +594,7 @@ class BackupManager:
                         error.code,
                     )
                     self.update(last_file_error=error.code, last_file_sdk_code=error.sdk_code)
-                    if error.code == "sdk_connect":
+                    if error.code in TRANSIENT_ERRORS:
                         # One device-wide recovery opportunity, not one retry per file.
                         next_run = time.time() + 60
                         break
