@@ -1,6 +1,8 @@
 """Authenticated, bounded read-only storage and SD-playback diagnostics."""
 
+import base64
 import struct
+import threading
 import time
 from datetime import datetime
 
@@ -46,6 +48,37 @@ def playback_probe(config, key, stream_type=None):
     result = {}
     phase = "control_response"
     with CameraClient(settings) as camera:
+        frame = bytearray()
+        done = threading.Event()
+        halt = threading.Event()
+        read_errors = []
+
+        def first_header():
+            deadline = time.monotonic() + 20
+            try:
+                while not halt.is_set() and time.monotonic() < deadline and len(frame) < 16:
+                    reply = camera.bridge.rpc(
+                        "read",
+                        session=camera.session,
+                        channel=3,
+                        size=16 - len(frame),
+                        timeout_ms=50,
+                    )
+                    if reply["ret"] not in (0, -3):
+                        raise CameraError("sd_frame_read", "SD channel read failed.", reply["ret"])
+                    chunk = base64.b64decode(reply.get("data", ""), validate=True)
+                    if len(chunk) > 16 - len(frame):
+                        raise CameraError("sd_frame_read", "SD frame header overflow.")
+                    frame.extend(chunk)
+                    if len(frame) < 16:
+                        halt.wait(0.05)
+            except (CameraError, OSError, ValueError) as error:
+                read_errors.append(getattr(error, "code", "sd_frame_read"))
+            finally:
+                done.set()
+
+        reader = threading.Thread(target=first_header, name="sd-probe-reader", daemon=True)
+        reader.start()
         try:
             camera.send(794, payload)
             reply = camera.response(795, time.monotonic() + settings.request_timeout)
@@ -57,12 +90,19 @@ def playback_probe(config, key, stream_type=None):
             )
             if command == 16 and code == 0:
                 phase = "first_frame"
-                head = camera.bridge.read_exact(camera.session, 3, 16, time.monotonic() + 15)
-                flag, size, pts, kind = struct.unpack("<4I", head)
+                done.wait(20)
+                if len(frame) != 16:
+                    raise CameraError(
+                        read_errors[0] if read_errors else "read_timeout",
+                        "No complete SD frame header arrived.",
+                    )
+                flag, size, pts, kind = struct.unpack("<4I", frame)
                 result.update(frame_flag=flag, frame_size=size, frame_pts=pts, frame_type=kind)
         except CameraError as error:
             result.update(probe_error=error.code, phase=phase, sdk_code=error.sdk_code)
         finally:
+            halt.set()
+            reader.join(timeout=2)
             stop = bytearray(payload)
             struct.pack_into("<I", stop, 4, 1)
             try:
