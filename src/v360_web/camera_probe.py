@@ -29,15 +29,18 @@ def storage_status(config):
     }
 
 
-def playback_probe(config, key, stream_type=2):
+def playback_probe(config, key, stream_type=None):
     settings = Settings.load(config)
     item = RecordingStore(settings.data_root).get(key)
     if not item or item["device_id"] != settings.did:
         raise CameraError("recording_missing", "Recording is not indexed for this device.")
+    # Normal single-camera overload uses the directory event byte as optSeq;
+    # the older NVR overload's stream-type byte is a different contract.
+    selector = item["event_type"] if stream_type is None else stream_type
     payload = bytearray(
         struct.pack("<III", item["channel"], 16, 0)
         + encode_time(datetime.fromisoformat(item["start_local"]), item["weekday"])
-        + bytes([stream_type, 0, 0, 0])
+        + bytes([selector, 0, 0, 0])
     )
     struct.pack_into("<H", payload, 22, (0 if settings.shared else settings.user_id) & 0xFFFF)
     result = {}

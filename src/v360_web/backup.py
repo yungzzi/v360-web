@@ -555,6 +555,9 @@ class BackupManager:
                     ("prepare:" if row["state"] == "verified" else "") + row["id"], time.time()
                 ):
                     continue
+                if batch is not None and attempts >= 3:
+                    next_run = min(next_run, time.time() + 60)
+                    break
                 attempts += 1
                 current_charged = False
                 try:
