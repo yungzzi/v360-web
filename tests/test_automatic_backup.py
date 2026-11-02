@@ -284,9 +284,10 @@ def test_server_backfills_one_day_and_persists_cursor(tmp_path, monkeypatch):
     assert queries[1][0].hour == 0 and queries[1][1].hour == 23
     assert not backup.snapshot()["backfill_complete"]
     restarted = manager(tmp_path, monkeypatch)
+    restarted.update(next_discovery=0)
     monkeypatch.setattr(service, "discover", discover)
     restarted.cycle()
-    assert queries[3][0].date() == queries[1][0].date() - timedelta(days=1)
+    assert queries[-1][0].date() == queries[1][0].date() - timedelta(days=1)
 
 
 def test_new_queue_precedes_history_and_summary_counts(tmp_path, monkeypatch):
@@ -396,7 +397,7 @@ def test_server_pipeline_exceeds_ten_and_finishes_each_record_before_next_downlo
     backup.cycle()
     state = backup.snapshot()
     assert state["archive"]["pending"] == 0
-    assert 590 < state["next_run"] - time.time() <= 600
+    assert 50 < state["next_run"] - time.time() <= 60
     assert len(events) == 22
     for i in range(0, 22, 2):
         assert events[i][0] == "download" and events[i + 1] == ("prepare", events[i][1])
@@ -486,16 +487,16 @@ def test_connection_outage_stops_batch_and_shortens_legacy_backoff(tmp_path, mon
 
     monkeypatch.setattr(service, "download", fail)
     backup.cycle()
-    assert calls == keys[:1]
+    assert calls == keys[-1:]
     assert backup.snapshot()["last_file_sdk_code"] == -3
-    assert not backup.retry_ready(keys[0], time.time())
-    assert backup.retry_ready(keys[0], time.time() + 601)
+    assert not backup.retry_ready(keys[-1], time.time())
+    assert backup.retry_ready(keys[-1], time.time() + 601)
     # New retry deadlines are independent of mutable catalog timestamps.
     with backup.db.connection() as db:
         db.execute(
-            "UPDATE backup_retries SET next_try=? WHERE id=?", (time.time() + 86400, keys[0])
+            "UPDATE backup_retries SET next_try=? WHERE id=?", (time.time() + 86400, keys[-1])
         )
-    assert not backup.retry_ready(keys[0], time.time() + 601)
+    assert not backup.retry_ready(keys[-1], time.time() + 601)
     assert RecordingStore(tmp_path).get(keys[1])["state"] == "discovered"
 
 
@@ -550,6 +551,7 @@ def test_fixed_recovery_scope_and_fair_order(tmp_path, monkeypatch):
     backup = manager(tmp_path, monkeypatch)
     policy(tmp_path, mode="server")
     backup.db.write("recovery_floor:test-device", "2026-01-01T00:00:00")
+    backup.db.write("fresh_floor:test-device", (datetime.now() - timedelta(days=1)).isoformat())
     with backup.db.connection() as db:
         db.execute(
             "UPDATE recordings SET start_local=? WHERE id=?",
@@ -558,4 +560,94 @@ def test_fixed_recovery_scope_and_fair_order(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(service, "download", lambda cfg, key: calls.append(key))
     backup.cycle()
-    assert calls == [keys[0], keys[3], keys[1], keys[2]]
+    assert calls == [keys[2], keys[1], keys[0], keys[3]]
+
+
+def test_minute_recovery_does_not_repeat_successful_catalog(tmp_path, monkeypatch):
+    _key, _ = record(tmp_path, state="discovered")
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    queries = []
+    monkeypatch.setattr(
+        service,
+        "discover",
+        lambda *args: queries.append(1) or {"metadata_complete": True, "records": 1},
+    )
+
+    def fail(*args):
+        raise CameraError("sdk_connect", "offline", -3)
+
+    monkeypatch.setattr(service, "download", fail)
+    backup.cycle()
+    assert 50 < backup.state["next_run"] - time.time() <= 60
+    backup.cycle()
+    assert queries == [1]
+
+
+def test_local_preparation_does_not_acquire_camera_lock(tmp_path, monkeypatch):
+    key, _ = record(tmp_path)
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    backup.db.write("recovery_floor:test-device", "2020-01-01T00:00:00")
+    calls = []
+    monkeypatch.setattr(
+        "v360_web.backup.playback.prepare", lambda config, ident: calls.append(ident)
+    )
+    backup.camera_lock.acquire()
+    try:
+        assert backup.prepare_one()
+    finally:
+        backup.camera_lock.release()
+    assert calls == [key]
+
+
+def test_download_prefetch_bounds_survive_restart(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    keys = [record(tmp_path, i, state="discovered")[0] for i in range(5)]
+    backup.prepare_thread = object()  # Exercise production pipeline selection without a racer.
+    calls = []
+
+    def save(config, key):
+        calls.append(key)
+        RecordingStore(tmp_path).update(key, "verified")
+
+    monkeypatch.setattr(service, "download", save)
+    backup.cycle()
+    assert len(calls) == 3
+    assert len(backup.db.read("download_ahead")) == 3
+    restarted = manager(tmp_path, monkeypatch)
+    restarted.prepare_thread = object()
+    restarted.cycle()
+    assert len(calls) == 3
+    assert len(keys) == 5
+
+
+def test_all_playback_callers_share_one_encoder():
+    from v360_web.playback import serial_encoder
+
+    entered = threading.Event()
+    release = threading.Event()
+    second = threading.Event()
+
+    @serial_encoder
+    def first():
+        entered.set()
+        assert release.wait(2)
+
+    @serial_encoder
+    def other():
+        second.set()
+
+    a = threading.Thread(target=first)
+    b = threading.Thread(target=other)
+    a.start()
+    assert entered.wait(1)
+    b.start()
+    try:
+        assert not second.wait(0.1)
+    finally:
+        release.set()
+        a.join(2)
+        b.join(2)
+    assert second.is_set()

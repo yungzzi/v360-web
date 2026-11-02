@@ -4,7 +4,9 @@ import math
 import os
 import re
 import subprocess
+import threading
 import time
+from functools import wraps
 from pathlib import Path
 
 from .config import Settings, read_private_json, write_private_json
@@ -46,6 +48,24 @@ def ready(root: Path, key: str, start=None):
     return None
 
 
+ENCODER_LOCK = threading.Lock()
+
+
+def serial_encoder(function):
+    @wraps(function)
+    def serialized(*args, **kwargs):
+        while not ENCODER_LOCK.acquire(timeout=0.2):
+            check_cancelled()
+        try:
+            check_cancelled()
+            return function(*args, **kwargs)
+        finally:
+            ENCODER_LOCK.release()
+
+    return serialized
+
+
+@serial_encoder
 def prepare(config: Path, key: str, start=None):
     if start is not None and (type(start) is not int or not 0 <= start < 3600 or start % 30):
         raise CameraError("preview_start", "Invalid playback window.")

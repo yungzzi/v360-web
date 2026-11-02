@@ -27,6 +27,8 @@ class BackupManager:
         self.wake = threading.Event()
         self.cancel = None
         self.thread = None
+        self.prepare_thread = None
+        self.prepare_cancel = threading.Event()
         self.running = False
         self.ready_summary_until = 0
         self.ready_summary = {}
@@ -55,8 +57,79 @@ class BackupManager:
 
     def start(self):
         if self.config and self.thread is None:
+            self.prepare_thread = threading.Thread(
+                target=self.prepare_loop, name="v360-prepare", daemon=True
+            )
+            self.prepare_thread.start()
             self.thread = threading.Thread(target=self.run, name="v360-backup", daemon=True)
             self.thread.start()
+
+    def prepare_one(self):
+        if (
+            not self.config
+            or not self.db.policy()["enabled"]
+            or self.db.policy()["mode"] != "server"
+        ):
+            return False
+        did = Settings.load(self.config).did
+        floor = self.db.read("recovery_floor:" + did)
+        if floor is None:
+            return False
+        rows = [
+            r
+            for r in self.db.list()
+            if r["device_id"] == did
+            and r["state"] == "verified"
+            and r["start_local"] >= floor
+            and not playback.ready(self.root, r["id"])
+            and self.retry_ready("prepare:" + r["id"], time.time())
+        ]
+        recent = (
+            datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None) - timedelta(hours=24)
+        ).isoformat()
+        recent = self.db.read("fresh_floor:" + did, recent)
+        ahead = set(self.db.read("download_ahead", []))
+        rows.sort(
+            key=lambda r: (
+                r["start_local"] < recent,
+                r["id"] not in ahead,
+                datetime.fromisoformat(r["start_local"])
+                + timedelta(seconds=max(0, min(r["duration_raw"], 3600))),
+            )
+        )
+        if not rows:
+            return False
+        key = rows[0]["id"]
+        self.prepare_cancel.clear()
+        token = progress.cancel_event.set(self.prepare_cancel)
+        shutdown = progress.shutdown_event.set(self.stopping)
+        try:
+            self.update(prepare_state="running")
+            playback.prepare(self.config, key)
+            self.ready_summary_until = 0
+            with self.db.connection() as db:
+                db.execute("DELETE FROM backup_retries WHERE id=?", ("prepare:" + key,))
+            self.update(prepare_state="waiting", last_prepare_error=None)
+        except CameraError as error:
+            if error.code not in ("backup_yielded", "interrupted"):
+                self.failed("prepare:" + key, time.time(), error.code)
+                self.db.write(
+                    "download_ahead", [k for k in self.db.read("download_ahead", []) if k != key]
+                )
+            self.update(prepare_state="waiting", last_prepare_error=error.code)
+        finally:
+            progress.cancel_event.reset(token)
+            progress.shutdown_event.reset(shutdown)
+        return True
+
+    def prepare_loop(self):
+        while not self.stopping.is_set():
+            try:
+                worked = self.prepare_one()
+            except Exception:  # noqa: BLE001
+                self.update(prepare_state="failed", last_prepare_error="prepare_worker_failed")
+                worked = False
+            self.stopping.wait(0.1 if worked else 2)
 
     def archive_summary(self):
         """Counts describe indexed records, never a promise of SD completeness."""
@@ -204,6 +277,7 @@ class BackupManager:
         return self.snapshot()
 
     def request_yield(self):
+        self.prepare_cancel.set()
         with self.guard:
             if self.running and self.cancel:
                 self.cancel.set()
@@ -230,7 +304,7 @@ class BackupManager:
         with self.db.connection() as db:
             row = db.execute("SELECT attempts FROM backup_retries WHERE id=?", (key,)).fetchone()
             attempts = (row[0] if row else 0) + 1
-            delay = 600 if code in TRANSIENT_ERRORS else (3600 if attempts < 3 else 86400)
+            delay = 60 if code in TRANSIENT_ERRORS else (3600 if attempts < 3 else 86400)
             db.execute(
                 "INSERT OR REPLACE INTO backup_retries VALUES (?,?,?)", (key, attempts, now + delay)
             )
@@ -319,18 +393,33 @@ class BackupManager:
             if policy["mode"] == "server" and scope_floor is None:
                 scope_floor = (end - timedelta(days=3)).isoformat()
                 self.db.write(scope_key, scope_floor)
+            fresh_key = "fresh_floor:" + settings.did
+            if self.db.read(fresh_key) is None:
+                self.db.write(fresh_key, (end - timedelta(minutes=30)).isoformat())
             local_only = False
+            discover_due = time.time() >= self.state.get("next_discovery", 0)
             try:
-                result = service.discover(self.config, 0, end - timedelta(hours=24), end)
+                result = (
+                    service.discover(self.config, 0, end - timedelta(hours=24), end)
+                    if discover_due
+                    else None
+                )
             except CameraError as error:
                 if policy["mode"] != "server" or error.code not in TRANSIENT_ERRORS:
                     raise
                 local_only = True
+                next_run = time.time() + 60
                 self.update(catalog_error=error.code, last_file_sdk_code=error.sdk_code)
             else:
+                if result is not None:
+                    self.update(next_discovery=time.time() + policy["interval_minutes"] * 60)
                 self.update(
-                    metadata_complete=result["metadata_complete"],
-                    queried_records=result["records"],
+                    metadata_complete=result["metadata_complete"]
+                    if result
+                    else self.state.get("metadata_complete", False),
+                    queried_records=result["records"]
+                    if result
+                    else self.state.get("queried_records", 0),
                     catalog_error=None,
                 )
 
@@ -341,6 +430,7 @@ class BackupManager:
                     if row["device_id"] == settings.did
                     and row["channel"] == 0
                     and row["state"] != "evicted"
+                    and not (self.prepare_thread is not None and row["state"] == "verified")
                     and (not local_only or row["state"] in ("verified", "downloaded_unverified"))
                     and (
                         row["state"] != "verified"
@@ -366,18 +456,25 @@ class BackupManager:
                 ordered = sorted(rows, key=lambda row: row["start_local"], reverse=True)
                 if policy["mode"] != "server":
                     return ordered
-                # Alternate newest and oldest: continuous new clips cannot starve recovery.
-                fair = []
-                while ordered:
-                    fair.append(ordered.pop(0))
-                    if ordered:
-                        fair.append(ordered.pop())
-                return fair
+                # New footage has a thirty-minute deadline; historic catch-up uses spare time.
+                recent_floor = self.db.read(fresh_key)
+                fresh = sorted(
+                    (r for r in ordered if r["start_local"] >= recent_floor),
+                    key=lambda r: (
+                        datetime.fromisoformat(r["start_local"])
+                        + timedelta(seconds=max(0, min(r["duration_raw"], 3600)))
+                    ),
+                )
+                history = sorted(
+                    (r for r in ordered if r["start_local"] < recent_floor),
+                    key=lambda r: r["start_local"],
+                )
+                return fresh + history
 
             rows = candidates()
             # Only query one older day when the recent queue leaves room this round.
             # Cursor is persisted after a successful query; failures retry the same day.
-            if policy["mode"] == "server" and not rows and not local_only:
+            if policy["mode"] == "server" and not rows and not local_only and discover_due:
                 progress.check_cancelled()
                 cursor_key = "backfill3:" + settings.did
                 cursor = self.db.read(cursor_key, {})
@@ -419,6 +516,19 @@ class BackupManager:
             prepared = 0
             for row in rows:
                 progress.check_cancelled()
+                if self.prepare_thread is not None:
+                    # Persistent bounded prefetch; readiness, not an in-memory notification,
+                    # releases a slot after restart or a completed conversion.
+                    ahead = [
+                        key
+                        for key in self.db.read("download_ahead", [])
+                        if not playback.ready(self.root, key)
+                        and (self.db.get(key) or {}).get("state") != "evicted"
+                    ]
+                    self.db.write("download_ahead", ahead)
+                    if len(ahead) >= 3:
+                        next_run = time.time() + 10
+                        break
                 if (
                     (policy["batch_files"] is not None and attempts >= policy["batch_files"])
                     or (policy["batch_bytes"] is not None and charged >= policy["batch_bytes"])
@@ -439,7 +549,11 @@ class BackupManager:
                             result = service.download(self.config, row["id"])
                             if not result or not result.get("rechecked_local_file"):
                                 downloaded += 1
-                    if policy["mode"] == "server":
+                        if self.prepare_thread is not None:
+                            ahead = self.db.read("download_ahead", [])
+                            if row["id"] not in ahead:
+                                self.db.write("download_ahead", ahead + [row["id"]])
+                    if policy["mode"] == "server" and self.prepare_thread is None:
                         progress.check_cancelled()
                         playback.prepare(self.config, row["id"])
                         prepared += 1
@@ -467,10 +581,17 @@ class BackupManager:
                     )
                     self.update(last_file_error=error.code, last_file_sdk_code=error.sdk_code)
                     if error.code == "sdk_connect":
-                        # Device-wide outage: do not label every other file as failed.
+                        # One device-wide recovery opportunity, not one retry per file.
+                        next_run = time.time() + 60
                         break
                     if error.code == "backup_budget":
                         break
+            if (
+                policy["mode"] == "server"
+                and not local_only
+                and not self.state.get("last_file_error")
+            ):
+                next_run = min(next_run, time.time() + 60)
             self.update(last_prepared=prepared)
             self.update(
                 state="waiting",
@@ -526,3 +647,5 @@ class BackupManager:
         self.wake.set()
         if self.thread:
             self.thread.join(timeout=45)
+        if self.prepare_thread:
+            self.prepare_thread.join(timeout=45)
