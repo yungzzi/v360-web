@@ -59,10 +59,19 @@ def download(config_path: Path, key: str, *, local_only=False, camera=None, defe
                     digest.update(chunk)
             if digest.hexdigest() == item["sha256"]:
                 report("validating")
-                probe(local)
-                validate_decode(local)
-                store.update(key, "verified", error=None)
-                return {"id": key, "state": "verified", "rechecked_local_file": True}
+                try:
+                    probe(local)
+                    validate_decode(local)
+                except CameraError:
+                    store.update(key, "failed", error="local_media_invalid")
+                    if local_only:
+                        raise CameraError(
+                            "local_media_invalid",
+                            "Local original requires a fresh device transfer.",
+                        ) from None
+                else:
+                    store.update(key, "verified", error=None)
+                    return {"id": key, "state": "verified", "rechecked_local_file": True}
     if local_only:
         raise CameraError(
             "local_original_invalid",
@@ -113,7 +122,7 @@ def download(config_path: Path, key: str, *, local_only=False, camera=None, defe
         info = probe(destination)
         report("validating")
         validate_decode(destination)
-        store.update(key, "verified")
+        store.update(key, "verified", error=None)
         return {
             "id": key,
             "state": "verified",
