@@ -307,6 +307,13 @@ def test_new_queue_precedes_history_and_summary_counts(tmp_path, monkeypatch):
     backup.cycle()
     assert len(queries) == 1
     assert backup.snapshot()["archive"] == {
+        "stages": {
+            "awaiting_download": 11,
+            "awaiting_validation": 0,
+            "awaiting_web": 1,
+            "device_rejected": 0,
+            "needs_refetch": 0,
+        },
         "recent_pending": 12,
         "overdue_pending": 0,
         "retry_pending": 0,

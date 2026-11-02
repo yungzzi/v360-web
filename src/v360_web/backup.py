@@ -216,7 +216,7 @@ class BackupManager:
         now_local = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
         with self.db.connection() as db:
             pending_rows = db.execute(
-                "SELECT id,start_local,duration_raw,error FROM recordings "
+                "SELECT id,start_local,duration_raw,error,state,first_seen_at,downloaded_at,validated_at,web_ready_at FROM recordings "
                 "WHERE device_id=? AND state!='evicted' AND start_local>=?",
                 (
                     did,
@@ -233,7 +233,17 @@ class BackupManager:
             < now_local - timedelta(minutes=30)
             for r in waiting
         )
+        stages = {
+            "awaiting_download": sum(
+                r["state"] not in ("verified", "downloaded_unverified") for r in waiting
+            ),
+            "awaiting_validation": sum(r["state"] == "downloaded_unverified" for r in waiting),
+            "awaiting_web": sum(r["state"] == "verified" for r in waiting),
+            "device_rejected": sum(r["error"] == "download_rejected" for r in waiting),
+            "needs_refetch": sum(r["error"] == "local_media_invalid" for r in waiting),
+        }
         return {
+            "stages": stages,
             "recent_pending": len(waiting) - overdue,
             "overdue_pending": overdue,
             "retry_pending": sum(bool(r["error"]) for r in waiting),

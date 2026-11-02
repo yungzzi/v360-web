@@ -41,6 +41,7 @@ def playback_probe(config, key):
     )
     struct.pack_into("<H", payload, 22, (0 if settings.shared else settings.user_id) & 0xFFFF)
     result = {}
+    phase = "control_response"
     with CameraClient(settings) as camera:
         try:
             camera.send(794, payload)
@@ -52,9 +53,12 @@ def playback_probe(config, key):
                 command=command, result=code, duration_raw=struct.unpack_from("<h", reply, 8)[0]
             )
             if command == 16 and code == 0:
+                phase = "first_frame"
                 head = camera.bridge.read_exact(camera.session, 3, 16, time.monotonic() + 5)
                 flag, size, pts, kind = struct.unpack("<4I", head)
                 result.update(frame_flag=flag, frame_size=size, frame_pts=pts, frame_type=kind)
+        except CameraError as error:
+            result.update(probe_error=error.code, phase=phase, sdk_code=error.sdk_code)
         finally:
             stop = bytearray(payload)
             struct.pack_into("<I", stop, 4, 1)
