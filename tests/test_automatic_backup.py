@@ -507,3 +507,22 @@ def test_archive_pending_age_and_failures_are_separate(tmp_path, monkeypatch):
     assert summary["overdue_pending"] == 1
     assert summary["retry_pending"] == 1
     assert summary["awaiting_playback"] == 2
+
+
+def test_catalog_outage_still_prepares_local_originals(tmp_path, monkeypatch):
+    local, _ = record(tmp_path, 10, state="verified")
+    record(tmp_path, 0, state="discovered")
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    prepared = []
+
+    def offline(*args):
+        raise CameraError("sdk_connect", "offline", -3)
+
+    monkeypatch.setattr(service, "discover", offline)
+    monkeypatch.setattr(service, "download", lambda *args: pytest.fail("No extra camera attempt"))
+    monkeypatch.setattr("v360_web.backup.playback.prepare", lambda cfg, key: prepared.append(key))
+    backup.cycle()
+    assert prepared == [local]
+    assert backup.snapshot()["catalog_error"] == "sdk_connect"
+    assert backup.snapshot()["last_prepared"] == 1

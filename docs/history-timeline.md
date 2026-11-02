@@ -94,3 +94,10 @@ the last thirty minutes from older pending clips, plus an overlapping failed
 retry count. Counts cover the current three-day processing scope, not only the
 selected timeline date, and never assert that the SD directory is complete.
 Readiness is based on full verified browser copies, not original-file presence.
+
+
+A further production check found a catalog connection failure prevented all local
+preparation that round. Server mode now catches transient catalog transport errors
+and continues preparing already verified originals without another camera request.
+Authentication failures still stop the cycle. UI explicitly reports this degraded
+mode. Catalog completeness is preserved, never inferred from an offline cycle.
