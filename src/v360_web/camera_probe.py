@@ -49,6 +49,7 @@ def playback_probe(config, key, stream_type=None):
     phase = "control_response"
     with CameraClient(settings) as camera:
         frame = bytearray()
+        frame_channel = []
         done = threading.Event()
         halt = threading.Event()
         read_errors = []
@@ -56,20 +57,28 @@ def playback_probe(config, key, stream_type=None):
         def first_header():
             deadline = time.monotonic() + 20
             try:
+                buffers = {channel: bytearray() for channel in (3, 2, 5)}
                 while not halt.is_set() and time.monotonic() < deadline and len(frame) < 16:
-                    reply = camera.bridge.rpc(
-                        "read",
-                        session=camera.session,
-                        channel=3,
-                        size=16 - len(frame),
-                        timeout_ms=50,
-                    )
-                    if reply["ret"] not in (0, -3):
-                        raise CameraError("sd_frame_read", "SD channel read failed.", reply["ret"])
-                    chunk = base64.b64decode(reply.get("data", ""), validate=True)
-                    if len(chunk) > 16 - len(frame):
-                        raise CameraError("sd_frame_read", "SD frame header overflow.")
-                    frame.extend(chunk)
+                    for channel, buffer in buffers.items():
+                        reply = camera.bridge.rpc(
+                            "read",
+                            session=camera.session,
+                            channel=channel,
+                            size=16 - len(buffer),
+                            timeout_ms=50,
+                        )
+                        if reply["ret"] not in (0, -3):
+                            raise CameraError(
+                                "sd_frame_read", "SD channel read failed.", reply["ret"]
+                            )
+                        chunk = base64.b64decode(reply.get("data", ""), validate=True)
+                        if len(chunk) > 16 - len(buffer):
+                            raise CameraError("sd_frame_read", "SD frame header overflow.")
+                        buffer.extend(chunk)
+                        if len(buffer) == 16:
+                            frame.extend(buffer)
+                            frame_channel.append(channel)
+                            break
                     if len(frame) < 16:
                         halt.wait(0.05)
             except (CameraError, OSError, ValueError) as error:
@@ -97,7 +106,13 @@ def playback_probe(config, key, stream_type=None):
                         "No complete SD frame header arrived.",
                     )
                 flag, size, pts, kind = struct.unpack("<4I", frame)
-                result.update(frame_flag=flag, frame_size=size, frame_pts=pts, frame_type=kind)
+                result.update(
+                    frame_channel=frame_channel[0],
+                    frame_flag=flag,
+                    frame_size=size,
+                    frame_pts=pts,
+                    frame_type=kind,
+                )
         except CameraError as error:
             result.update(probe_error=error.code, phase=phase, sdk_code=error.sdk_code)
         finally:
