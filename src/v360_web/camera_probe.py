@@ -1,3 +1,5 @@
+from .config import command_user_id, old_device_platform
+
 """Authenticated, bounded read-only storage and SD-playback diagnostics."""
 
 import base64
@@ -60,13 +62,15 @@ def playback_probe(config, key, stream_type=None, capture=False):
         raise CameraError("recording_missing", "Recording is not indexed for this device.")
     # Normal single-camera overload uses the directory event byte as optSeq;
     # the older NVR overload's stream-type byte is a different contract.
-    selector = item["event_type"] if stream_type is None else stream_type
+    event = item["event_type"]
+    default_selector = (1 if event in (1, 3, 4) else 2) if old_device_platform(settings) else event
+    selector = default_selector if stream_type is None else stream_type
     payload = bytearray(
         struct.pack("<III", item["channel"], 16, 0)
         + encode_time(datetime.fromisoformat(item["start_local"]), item["weekday"])
         + bytes([selector, 0, 0, 0])
     )
-    struct.pack_into("<H", payload, 22, (0 if settings.shared else settings.user_id) & 0xFFFF)
+    struct.pack_into("<H", payload, 22, (command_user_id(settings)) & 0xFFFF)
     result = {}
     phase = "control_response"
     with CameraClient(settings) as camera:

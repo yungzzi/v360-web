@@ -152,3 +152,15 @@ def initialize_config(directory: Path):
         },
     )
     write_private_json(directory / "web.json", {"access_token": secrets.token_urlsafe(32)})
+
+
+LEGACY_DEVICE_PREFIXES = ("MATE", "KEEP", "ZSYAS", "MNET", "BFEP", "CFET", "CFMT", "CFCD", "NFET")
+
+
+def old_device_platform(settings):
+    return getattr(settings, "did", "").startswith(LEGACY_DEVICE_PREFIXES)
+
+
+def command_user_id(settings):
+    """Mirror P2pSDK.getCmdUserId; device login retains its separate account ID."""
+    return 0 if settings.shared or old_device_platform(settings) else settings.user_id

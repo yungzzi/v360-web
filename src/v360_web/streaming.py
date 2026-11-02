@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import protocol as wire
 from .client import CameraClient
-from .config import Settings
+from .config import Settings, command_user_id
 from .controls import CameraControls
 from .errors import CameraError
 from .lenses import crop_filter, source_view
@@ -44,9 +44,7 @@ def camera_frames(config: Path, stop: threading.Event, controls=None, lens=0):
         pending, pending_bytes = [], 0
         audio_mode = None if lens == 0 else False
         try:
-            camera.send(
-                wire.LIVE_START, wire.live_payload(2, 0 if settings.shared else settings.user_id)
-            )
+            camera.send(wire.LIVE_START, wire.live_payload(2, command_user_id(settings)))
             if lens == 0:
                 camera.send(wire.AUDIO_START, struct.pack("<I", 0))
             else:

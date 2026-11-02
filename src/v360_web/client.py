@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import protocol as wire
 from .bridge import create_bridge
-from .config import Settings
+from .config import Settings, command_user_id
 from .diagnostics import record
 from .errors import CameraError
 from .progress import cancel_event, check_cancelled, report
@@ -184,7 +184,7 @@ class CameraClient:
     def download(
         self, channel: int, start: datetime, target: Path, weekday: int = 0, progress=None
     ):
-        user_id = 0 if self.settings.shared else self.settings.user_id
+        user_id = command_user_id(self.settings)
         self.send(wire.DOWNLOAD_REQUEST, wire.download_payload(channel, start, user_id, weekday))
         response = self.response(
             wire.DOWNLOAD_RESPONSE, time.monotonic() + self.settings.request_timeout

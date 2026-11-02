@@ -201,3 +201,24 @@ def test_bounded_transport_recovery_before_login(bridge_server, monkeypatch, mod
                 pass
             assert len(state["writes"]) == 1
         assert state["connect_calls"] == expected
+
+
+@pytest.mark.parametrize(
+    "prefix", ["MATE", "KEEP", "ZSYAS", "MNET", "BFEP", "CFET", "CFMT", "CFCD", "NFET"]
+)
+def test_legacy_command_identity_is_not_account_login_identity(prefix):
+    from types import SimpleNamespace
+
+    from v360_web.config import command_user_id
+
+    configured = SimpleNamespace(did=prefix + "-owned-test", shared=False, user_id=0x12345678)
+    assert command_user_id(configured) == 0
+    assert (
+        struct.unpack_from(
+            "<I", protocol.login_payload("owned-device", configured.user_id, False), 68
+        )[0]
+        == 0x12345678
+    )
+    assert protocol.download_payload(0, datetime(2026, 11, 2), command_user_id(configured))[
+        20:24
+    ] == bytes(4)
