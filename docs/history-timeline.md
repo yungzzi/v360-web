@@ -129,3 +129,16 @@ an original-App open/close comparison to investigate low-power connectivity;
 no assumption that an omitted wake API exists. Feature remains unmerged pending
 further connection diagnosis. Private server records: recovery-targets-20261102.json
 and recovery-three-results-20261102.json under backups/.
+
+
+Follow-up: after user reported opening original-App live for about ten seconds
+and closing it, the remaining 00:37:17 target downloaded and validated in 27.3s.
+Its full browser copy also passed validation and authenticated 206 range delivery.
+All three preselected targets now have verified full web files. The next automatic
+cycle queried successfully and was observed downloading additional files (800
+originals and 382 full browser copies at check time). This temporal comparison
+supports investigating low-power/online state, but does not establish causality:
+connection recovery could also be intermittent and the exact App-close interval
+was not controlled. Independent sleeping-device wake and sustained unattended
+throughput remain unaccepted; keep feature branch open. Private detailed evidence:
+backups/app-open-comparison-20261102.json and app-comparison-acceptance-20261102.json.
