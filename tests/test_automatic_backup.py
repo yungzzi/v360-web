@@ -306,6 +306,9 @@ def test_new_queue_precedes_history_and_summary_counts(tmp_path, monkeypatch):
     backup.cycle()
     assert len(queries) == 1
     assert backup.snapshot()["archive"] == {
+        "recent_pending": 12,
+        "overdue_pending": 0,
+        "retry_pending": 0,
         "ready": 0,
         "awaiting_playback": 12,
         "pending_in_scope": 11,
@@ -468,3 +471,39 @@ def test_server_preparation_failures_stop_at_work_window(tmp_path, monkeypatch):
     monkeypatch.setattr(playback, "prepare", fail)
     backup.cycle()
     assert len(calls) == 2
+
+
+def test_connection_outage_stops_batch_and_shortens_legacy_backoff(tmp_path, monkeypatch):
+    keys = [record(tmp_path, i, state="discovered")[0] for i in range(4)]
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    calls = []
+
+    def fail(config, key):
+        calls.append(key)
+        RecordingStore(tmp_path).update(key, "failed", error="sdk_connect")
+        raise CameraError("sdk_connect", "offline", -3)
+
+    monkeypatch.setattr(service, "download", fail)
+    backup.cycle()
+    assert calls == keys[:1]
+    assert backup.snapshot()["last_file_sdk_code"] == -3
+    assert not backup.retry_ready(keys[0], time.time())
+    assert backup.retry_ready(keys[0], time.time() + 601)
+    # Previously accumulated one-day backoff must not keep transport failures stuck.
+    with backup.db.connection() as db:
+        db.execute("UPDATE backup_retries SET next_try=? WHERE id=?", (time.time()+86400, keys[0]))
+    assert backup.retry_ready(keys[0], time.time() + 601)
+    assert RecordingStore(tmp_path).get(keys[1])["state"] == "discovered"
+
+
+def test_archive_pending_age_and_failures_are_separate(tmp_path, monkeypatch):
+    record(tmp_path, 0, state="discovered")
+    old, _ = record(tmp_path, 60, state="failed")
+    RecordingStore(tmp_path).update(old, "failed", error="sdk_read")
+    backup = manager(tmp_path, monkeypatch)
+    summary = backup.archive_summary()
+    assert summary["recent_pending"] == 1
+    assert summary["overdue_pending"] == 1
+    assert summary["retry_pending"] == 1
+    assert summary["awaiting_playback"] == 2

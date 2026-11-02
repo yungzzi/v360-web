@@ -71,3 +71,26 @@ Server policy now checks every 10 minutes, with no daily, file-count or batch-by
 Recent 24-hour metadata is checked each cycle. When the known work queue is empty, one of the previous two calendar days is queried; successful scans are remembered for that date, so idle cycles do not repeatedly wake the device to rescan old days. Invalid catalog entries remain explicitly incomplete. Thirty minutes is a readiness target after recording finishes, not a guarantee during device outages, failures or workload beyond available processing capacity. The UI distinguishes total awaiting browser readiness from missing originals, avoiding the earlier misleading backlog count.
 
 Checks include more than ten clips processed in one cycle, download/prepare event ordering per clip, exclusion of a ten-day-old original, persisted history cursor, operation-time window, foreground cancellation, duplicate/prepared-file handling and unchanged storage protections. Battery cutoff is not guessed from uncalibrated readings; no additional battery-only camera sessions are introduced.
+
+
+## 2026-11-02: transient connection recovery and visible backlog
+
+Read-only production inspection at 11:04 HKT found 356 indexed recordings for
+November 2, 278 full browser-ready files and 78 pending; 59 records carried
+transport errors (56 sdk_connect, 3 sdk_read). These error names identify the
+failed stage, not the underlying modem, camera sleep or network cause.
+
+Previously every file error inherited a one-hour backoff, increasing to one day
+after three attempts. A device connection outage also continued through other
+files. Connection setup failure now ends the current batch; the normal ten-minute
+server schedule retries, without treating untouched files as failed. Transport
+errors use a ten-minute retry delay. Existing long transport backoffs are capped
+at ten minutes after the last recorded update; authentication errors remain
+separate and are never automatically bypassed. Last SDK numeric error is kept in
+backup status for later diagnosis. This does not prove connection failures cured.
+
+Archive summary now separates known pending clips whose reported end is within
+the last thirty minutes from older pending clips, plus an overlapping failed
+retry count. Counts cover the current three-day processing scope, not only the
+selected timeline date, and never assert that the SD directory is complete.
+Readiness is based on full verified browser copies, not original-file presence.
