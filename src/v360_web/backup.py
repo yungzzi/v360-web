@@ -14,6 +14,7 @@ from .diagnostics import record
 from .errors import CameraError
 from .jobs import JobStore
 from .maintenance import cleanup
+from .publication import Publication
 
 TRANSIENT_ERRORS = {"sdk_connect", "sdk_read", "sdk_write", "read_timeout"}
 
@@ -23,6 +24,7 @@ class BackupManager:
         self.root, self.config, self.camera_lock = root, config, camera_lock
         self.db = BackupPolicy(root)
         self.jobs = JobStore(root)
+        self.publication = Publication(root)
         self.guard = threading.RLock()
         self.stopping = threading.Event()
         self.wake = threading.Event()
@@ -72,6 +74,7 @@ class BackupManager:
                 key
                 for key in self.db.read("download_ahead", [])
                 if key != remove
+                and self.publication.allowed(self.db.get(key))
                 and not playback.ready(self.root, key)
                 and (self.db.get(key) or {}).get("state") != "evicted"
             ]
@@ -96,6 +99,7 @@ class BackupManager:
             for r in self.db.list()
             if r["device_id"] == did
             and r["state"] in ("verified", "downloaded_unverified")
+            and self.publication.allowed(r)
             and r["start_local"] >= floor
             and not playback.ready(self.root, r["id"])
             and self.retry_ready("prepare:" + r["id"], time.time())
@@ -351,6 +355,9 @@ class BackupManager:
                 recent_rejection = (
                     now < end.replace(tzinfo=ZoneInfo("Asia/Hong_Kong")).timestamp() + 1800
                 )
+        if self.publication.enabled() and code == "download_rejected":
+            item = self.db.get(key)
+            recent_rejection = bool(item and self.publication.allowed(item))
         with self.db.connection() as db:
             row = db.execute("SELECT attempts FROM backup_retries WHERE id=?", (key,)).fetchone()
             attempts = (row[0] if row else 0) + 1
@@ -360,6 +367,9 @@ class BackupManager:
                 or code in TRANSIENT_ERRORS | {"local_media_invalid", "media_incomplete"}
                 else (3600 if attempts < 3 else 86400)
             )
+            if self.publication.enabled() and recent_rejection:
+                count = self.publication.info(self.db.get(key))["attempts"]
+                delay = (60, 180, 480, 900, 900)[min(max(count - 1, 0), 4)]
             db.execute(
                 "INSERT OR REPLACE INTO backup_retries VALUES (?,?,?)", (key, attempts, now + delay)
             )
@@ -519,6 +529,7 @@ class BackupManager:
                     if row["device_id"] == settings.did
                     and row["channel"] == 0
                     and row["state"] != "evicted"
+                    and self.publication.allowed(row)
                     and not (
                         self.prepare_thread is not None
                         and row["state"] in ("verified", "downloaded_unverified")
@@ -564,6 +575,8 @@ class BackupManager:
                 return fresh + history
 
             rows = candidates()
+            if self.publication.enabled():
+                rows.sort(key=lambda row: (self.publication.info(row)["attempts"] > 0, self.publication.info(row)["release_at"]))
             # Only query one older day when the recent queue leaves room this round.
             # Cursor is persisted after a successful query; failures retry the same day.
             if policy["mode"] == "server" and not rows and not local_only and discover_due:
@@ -628,6 +641,8 @@ class BackupManager:
                 if batch is not None and attempts >= 3:
                     next_run = min(next_run, time.time() + 60)
                     break
+                if self.publication.enabled() and not self.publication.begin(row["id"]):
+                    continue
                 attempts += 1
                 current_charged = False
                 try:
@@ -675,6 +690,8 @@ class BackupManager:
                     next_run = min(next_run, retry_at)
                     self.update(last_file_error=error.code, last_file_sdk_code=error.sdk_code)
                     if error.code in TRANSIENT_ERRORS:
+                        if self.publication.enabled() and error.code == "sdk_connect":
+                            self.publication.device_unavailable(row["id"])
                         # One device-wide recovery opportunity, not one retry per file.
                         next_run = time.time() + 60
                         break
