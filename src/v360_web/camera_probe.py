@@ -1,5 +1,3 @@
-from .config import command_user_id, old_device_platform
-
 """Authenticated, bounded read-only storage and SD-playback diagnostics."""
 
 import base64
@@ -12,7 +10,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .client import CameraClient
-from .config import Settings
+from .config import Settings, command_user_id, old_device_platform
 from .errors import CameraError
 from .media import find_tool
 from .protocol import encode_time
