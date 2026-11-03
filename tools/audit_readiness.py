@@ -25,6 +25,9 @@ def snapshot(home, verified_http=None):
             "SELECT * FROM recordings WHERE start_local>=? AND state!='evicted'", (floor,)
         ).fetchall()
         checks = db.execute("SELECT diagnostics FROM catalog_checks").fetchall()
+        has_publication = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='publication_settings'").fetchone()
+        flag = db.execute("SELECT enabled FROM publication_settings WHERE id=1").fetchone() if has_publication else None
+        batched = bool(flag and flag[0])
     token = json.loads((home / "config/web.json").read_text())["access_token"]
     details = []
     remaining_http = 20
@@ -39,8 +42,13 @@ def snapshot(home, verified_http=None):
         end = datetime.fromisoformat(row["start_local"]) + timedelta(
             seconds=max(0, min(row["duration_raw"], 3600))
         )
-        entry["deadline"] = (end + timedelta(minutes=30)).isoformat()
-        entry["overdue"] = now > end + timedelta(minutes=30)
+        deadline = (
+            end.replace(minute=end.minute // 30 * 30, second=0, microsecond=0) + timedelta(hours=1)
+            if batched else end + timedelta(minutes=30)
+        )
+        entry["deadline"] = deadline.isoformat()
+        entry["deadline_basis"] = "batch_publication" if batched else "end_plus_30_minutes"
+        entry["overdue"] = now >= deadline
         try:
             manifest = root / "previews" / (row["id"] + ".json")
             info = json.loads(manifest.read_text())
@@ -55,7 +63,8 @@ def snapshot(home, verified_http=None):
                 and media.is_file()
                 and media.stat().st_size == info.get("bytes")
             )
-            if ready:
+            entry["prepared"] = bool(ready)
+            if ready and (not batched or now >= deadline):
                 entry["ready"] = True
                 stamp = row["web_ready_at"] if "web_ready_at" in set(row.keys()) else None
                 ready_time = (
@@ -95,7 +104,7 @@ def snapshot(home, verified_http=None):
         "full_ready": sum(r["ready"] for r in details),
         "overdue_missing": len(overdue),
         "missing_reasons": dict(Counter(r["error"] or r["state"] for r in overdue)),
-        "late_ready": sum(r["ready"] and r.get("latency_seconds", 0) > 1800 for r in details),
+        "late_ready": sum(r["ready"] and r.get("ready_time", "") > r["deadline"] for r in details),
         "max_ready_latency_seconds": max(
             (r.get("latency_seconds", 0) for r in details if r["ready"]), default=None
         ),

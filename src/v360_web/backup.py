@@ -14,7 +14,7 @@ from .diagnostics import record
 from .errors import CameraError
 from .jobs import JobStore
 from .maintenance import cleanup
-from .publication import Publication
+from .publication import Publication, window
 
 TRANSIENT_ERRORS = {"sdk_connect", "sdk_read", "sdk_write", "read_timeout"}
 
@@ -259,12 +259,15 @@ class BackupManager:
             ).fetchall()
         waiting = [r for r in pending_rows if r["id"] not in self.ready_ids]
         # Use the declared clip end: an ongoing clip is not overdue.
+        batched = self.publication.enabled()
         overdue = sum(
+            window(r)[2] <= now_local if batched else
             datetime.fromisoformat(r["start_local"])
             + timedelta(seconds=max(0, min(r["duration_raw"], 3600)))
             < now_local - timedelta(minutes=30)
             for r in waiting
         )
+        stopped = sum(bool(self.publication.info(r)["stopped_reason"]) for r in waiting) if batched else 0
         stages = {
             "awaiting_download": sum(
                 r["state"] not in ("verified", "downloaded_unverified") for r in waiting
@@ -277,8 +280,9 @@ class BackupManager:
         return {
             "stages": stages,
             "recent_pending": len(waiting) - overdue,
+            **({"stopped_auto": stopped, "batch_publication": True} if batched else {}),
             "overdue_pending": overdue,
-            "retry_pending": sum(bool(r["error"]) for r in waiting),
+            "retry_pending": sum(bool(r["error"]) and (not batched or self.publication.allowed(r)) for r in waiting),
             **self.ready_summary,
             "awaiting_playback": max(0, in_scope[0] - self.recent_ready_count),
             "pending_in_scope": in_scope[1],
