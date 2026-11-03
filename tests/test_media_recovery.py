@@ -70,3 +70,69 @@ def test_inconsistent_parameter_sets_cannot_choose_a_convenient_rate(monkeypatch
     )
     with pytest.raises(CameraError):
         recovery.parameter_rate(tmp_path / "synthetic.hevc")
+
+
+@pytest.mark.parametrize("fail_stage", [None, "clock", "duration", "decode", "consumer"])
+def test_recovery_keeps_original_and_cleans_temporary_files(monkeypatch, tmp_path, fail_stage):
+    import hashlib
+
+    key = "a" * 32
+    source = tmp_path / "media" / (key + ".media")
+    source.parent.mkdir()
+    content = original(fixture_mdat())
+    source.write_bytes(content)
+    sha = hashlib.sha256(content).hexdigest()
+    seconds = 2 / 15
+    item = {
+        "id": key, "device_id": "BFEP-test", "sha256": sha,
+        "duration_raw": seconds if fail_stage != "duration" else 30,
+    }
+    video = {"codec_type": "video", "codec_name": "hevc", "width": 1920,
+             "height": 1080, "nb_frames": "1", "r_frame_rate": "15/1"}
+    original_info = {"streams": [video], "format": {"duration": "0"}}
+    repaired_info = {"streams": [{**video, "nb_frames": "2"}],
+                     "format": {"duration": str(seconds)}}
+    monkeypatch.setattr(recovery, "cleanup", lambda *a, **kw: None)
+    monkeypatch.setattr(recovery, "admit", lambda *a, **kw: None)
+    monkeypatch.setattr(recovery, "record", lambda *a, **kw: None)
+    monkeypatch.setattr(recovery, "probe", lambda path: repaired_info)
+
+    def clock(path):
+        if fail_stage == "clock":
+            raise recovery.unavailable()
+        return Fraction(15, 1)
+
+    def remux(command, **kw):
+        from pathlib import Path
+        Path(command[-1]).write_bytes(b"temporary-reconstructed-file")
+        return SimpleNamespace(returncode=0)
+
+    decoded = []
+
+    def decode(path):
+        decoded.append(path)
+        if fail_stage == "decode":
+            raise CameraError("media_decode", "Synthetic damaged source.")
+
+    monkeypatch.setattr(recovery, "parameter_rate", clock)
+    monkeypatch.setattr(recovery, "run_media", remux)
+    monkeypatch.setattr(recovery, "validate_decode", decode)
+
+    def consume():
+        with recovery.playable_source(source, item, tmp_path, original_info) as (path, info, evidence):
+            assert path != source and path.is_file()
+            assert info == repaired_info
+            assert evidence["original_sha256"] == sha
+            assert evidence["frames"] == 2
+            assert decoded == [path]
+            if fail_stage == "consumer":
+                raise CameraError("preview_failed", "Synthetic conversion failure.")
+
+    if fail_stage:
+        with pytest.raises(CameraError):
+            consume()
+    else:
+        consume()
+    assert source.read_bytes() == content
+    assert not list((tmp_path / "previews").glob("*.repair.*"))
+    assert not recovery.RECOVERY_LOCK.locked()

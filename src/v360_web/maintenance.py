@@ -152,14 +152,15 @@ def cleanup(root, additional=0, kind="archive", protected=None):
         return {"removed_recordings": len(removed), "removed_cache_bytes": removed_cache}
 
 
-def preview_suffixes(root, key):
+def preview_suffixes(root, key, windows=None):
     """Only owned, bounded window names share the parent recording lease/quota."""
     yield ".mp4"
     yield ".json"
     yield ".repair.hevc"
     yield ".repair.alaw"
     yield ".repair.mp4"
-    for path in (root / "previews").glob(key + ".s*"):
+    candidates = (root / "previews").glob(key + ".s*") if windows is None else windows.get(key, ())
+    for path in candidates:
         suffix = path.name[len(key) :]
         if re.fullmatch(r"\.s[0-9]{4}\.(mp4|json|partial\.mp4)", suffix):
             yield suffix
@@ -177,6 +178,18 @@ def cleanup_combined(root, store, rows, policy, additional, protected):
         used + additional - limit,
         storage.FREE_RESERVE + additional - storage.shutil.disk_usage(root).free,
     )
+    cutoff = (datetime.now(UTC) - timedelta(days=policy["retention_days"])).isoformat()
+    if required <= 0 and not any(
+        row["state"] == "verified" and row["saved_at"] and row["saved_at"] < cutoff
+        for row in rows
+    ):
+        storage.check_free(root, additional)
+        return {"removed_recordings": 0, "removed_cache_bytes": 0}
+    # Enumerate window files once, rather than scan the entire folder per record.
+    windows = {}
+    for path in (root / "previews").glob("*.s*"):
+        if re.fullmatch(r"[a-f0-9]{32}\.s[0-9]{4}\.(mp4|json|partial\.mp4)", path.name):
+            windows.setdefault(path.name[:32], []).append(path)
     eligible = []
     for row in rows:
         key = row["id"]
@@ -196,14 +209,13 @@ def cleanup_combined(root, store, rows, policy, additional, protected):
         files = [original]
         files += [
             p
-            for suffix in preview_suffixes(root, key)
+            for suffix in preview_suffixes(root, key, windows)
             if (p := owned(root, "previews", key, suffix)) is not None
         ]
         sizes = [(p, p.stat().st_size) for p in files if p.is_file()]
         eligible.append((row, sizes, sum(size for _, size in sizes)))
     if required > sum(size for _, _, size in eligible):
         raise CameraError("storage_limit", "Protected or unmanaged files prevent safe cleanup.")
-    cutoff = (datetime.now(UTC) - timedelta(days=policy["retention_days"])).isoformat()
     removed, cache_bytes = [], 0
     for row, files, size in eligible:
         if required <= 0 and row["saved_at"] >= cutoff:
