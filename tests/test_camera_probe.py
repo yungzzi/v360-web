@@ -115,3 +115,34 @@ def test_probe_receives_frame_when_reader_precedes_start(monkeypatch):
     assert "probe_error" not in result
     assert result["frame_time_in_requested_range"] is False
     assert "stop_confirmed" in result
+
+
+def test_playback_primed_download_uses_same_session_and_always_stops(monkeypatch):
+    peer = Peer(struct.pack("<iihBB", 16, 0, 15, 0, 0))
+    setup(monkeypatch, peer)
+    item = {
+        "device_id": "test",
+        "channel": 0,
+        "event_type": 0,
+        "duration_raw": 15,
+        "start_local": "2026-11-02T12:00:00",
+        "weekday": 1,
+    }
+    monkeypatch.setattr(
+        camera_probe, "RecordingStore", lambda _: SimpleNamespace(get=lambda _: item)
+    )
+    # Empty read ends immediately with a transport error; a missing frame must
+    # not prevent testing the independent, identity-checked file-transfer command.
+    peer.bridge.rpc = lambda *args, **kwargs: {"ret": -4, "data": ""}
+    calls = []
+
+    def download(config, key, **kwargs):
+        calls.append((key, kwargs))
+        raise CameraError("download_rejected", "unavailable", -1)
+
+    monkeypatch.setattr("v360_web.service.download", download)
+    result = camera_probe.playback_probe(None, "key", test_download=True)
+    assert calls == [("key", {"camera": peer, "defer_validation": True})]
+    assert result["primed_download_error"] == "download_rejected"
+    assert result["stop_requested"]
+    assert struct.unpack_from("<I", peer.sent[-1][1], 4)[0] == 1

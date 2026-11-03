@@ -1,4 +1,4 @@
-"""Authenticated, bounded read-only storage and SD-playback diagnostics."""
+"""Authenticated, bounded storage and SD-playback diagnostics."""
 
 import base64
 import hashlib
@@ -53,7 +53,7 @@ def storage_status(config):
     }
 
 
-def playback_probe(config, key, stream_type=None, capture=False):
+def playback_probe(config, key, stream_type=None, capture=False, test_download=False):
     settings = Settings.load(config)
     item = RecordingStore(settings.data_root).get(key)
     if not item or item["device_id"] != settings.did:
@@ -214,6 +214,19 @@ def playback_probe(config, key, stream_type=None, capture=False):
         finally:
             halt.set()
             reader.join(timeout=2)
+            if test_download and result.get("command") == 16 and result.get("result") == 0:
+                # Controlled compatibility test: original App downloads while its
+                # SD playback session is already open. File identity and source
+                # validation remain the normal archive pipeline's responsibility.
+                from . import service
+
+                try:
+                    result["primed_download"] = service.download(
+                        config, key, camera=camera, defer_validation=True
+                    )
+                except CameraError as error:
+                    result["primed_download_error"] = error.code
+                    result["primed_download_sdk_code"] = error.sdk_code
             stop = bytearray(payload)
             struct.pack_into("<I", stop, 4, 1)
             try:

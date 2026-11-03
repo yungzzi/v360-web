@@ -617,9 +617,12 @@ def create_app(
 
     @app.post("/api/jobs/sd-probe/{key}", status_code=202, dependencies=[Depends(authorize)])
     def sd_probe_job(
-        key: str, stream_type: int | None = Query(default=None, ge=0, le=255), capture: bool = False
+        key: str,
+        stream_type: int | None = Query(default=None, ge=0, le=255),
+        capture: bool = False,
+        test_download: bool = False,
     ):
-        return submit(camera_probe.playback_probe, key, stream_type, capture)
+        return submit(camera_probe.playback_probe, key, stream_type, capture, test_download)
 
     @app.post("/api/jobs/download/{key}", status_code=202, dependencies=[Depends(authorize)])
     def download_job(key: str):
