@@ -134,7 +134,9 @@ class BackupManager:
                     # A one-frame/zero-duration source passes a decode-only check.
                     # Re-fetch its source instead of retrying the same conversion forever.
                     self.db.update(key, "failed", error="local_media_invalid")
-                    retry_at = self.failed(key, time.time(), "local_media_invalid")
+                    retry_at = self.failed(
+                        key, time.time(), "local_media_invalid", stage="prepare_failed"
+                    )
                     self.update(next_run=min(self.state.get("next_run", retry_at), retry_at))
                     self.wake.set()
                 else:
@@ -334,7 +336,7 @@ class BackupManager:
             row = db.execute("SELECT next_try FROM backup_retries WHERE id=?", (key,)).fetchone()
         return not row or row[0] <= now
 
-    def failed(self, key, now, code=None):
+    def failed(self, key, now, code=None, *, stage=None):
         recent_rejection = False
         if code == "download_rejected":
             item = self.db.get(key)
@@ -360,7 +362,7 @@ class BackupManager:
 
         record(
             self.root,
-            "prepare_failed" if key.startswith("prepare:") else "download_failed",
+            stage or ("prepare_failed" if key.startswith("prepare:") else "download_failed"),
             key=key.removeprefix("prepare:"),
             attempt=attempts,
             error=code,

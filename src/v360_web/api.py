@@ -612,8 +612,8 @@ def create_app(
         return submit(service.discover, body.channel, body.start, body.end, body.prime_calendar)
 
     @app.post("/api/jobs/storage-check", status_code=202, dependencies=[Depends(authorize)])
-    def storage_check_job():
-        return submit(camera_probe.storage_status)
+    def storage_check_job(health: bool = False):
+        return submit(camera_probe.storage_status, health)
 
     @app.post("/api/jobs/sd-probe/{key}", status_code=202, dependencies=[Depends(authorize)])
     def sd_probe_job(

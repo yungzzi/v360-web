@@ -29,7 +29,81 @@ def monthly_index(camera, year, month, channel=0):
     }
 
 
-def storage_status(config):
+def read_device_health(camera, root):
+    """Read normal record settings and bounded log pages; never send a setter."""
+    result = {}
+    try:
+        camera.send(786, bytes(8))
+        reply = camera.response(787, time.monotonic() + 5)
+        if len(reply) < 12:
+            raise CameraError("record_config_response", "Recording settings are truncated.")
+        result["record_channel"], result["record_type_raw"] = struct.unpack_from("<ii", reply)
+    except CameraError as error:
+        result["record_config_error"] = error.code
+    pages, raw = {}, bytearray()
+    total, complete = None, False
+    try:
+        camera.send(33224, bytes(8))
+        deadline = time.monotonic() + 10
+        for _ in range(32):
+            reply = camera.response(33225, deadline)
+            if len(reply) < 12:
+                raise CameraError("device_log_response", "Device log page is truncated.")
+            count, sequence, size = struct.unpack_from("<iii", reply)
+            if not 0 <= size <= len(reply) - 12 or count < 0 or sequence < 0:
+                raise CameraError("device_log_response", "Device log page fields are invalid.")
+            if total is not None and total != count:
+                raise CameraError("device_log_response", "Device log page total changed.")
+            total = count
+            content = reply[12 : 12 + size]
+            if sequence in pages and pages[sequence] != content:
+                raise CameraError("device_log_response", "Device log page identity changed.")
+            if sequence not in pages:
+                if len(raw) + size > 256 * 1024:
+                    break
+                pages[sequence] = content
+                raw.extend(content)
+            if count == 0 and size == 0:
+                complete = True
+                break
+            if len(pages) == count and set(pages) in (set(range(count)), set(range(1, count + 1))):
+                complete = True
+                break
+    except CameraError as error:
+        result["device_log_error"] = error.code
+    if raw:
+        folder = root / "protocol-diagnostics"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = folder / "device-health-latest.log"
+        # Root is the configured private data directory, never user-selected.
+        if target.is_symlink():
+            raise CameraError("device_log_path", "Private log path must not be a symlink.")
+        with target.open("wb") as output:
+            import os
+
+            os.fchmod(output.fileno(), 0o600)
+            for sequence in sorted(pages):
+                output.write(pages[sequence])
+        text = raw.decode("utf-8", errors="replace").lower()
+        result["log_keyword_counts"] = {
+            word: text.count(word)
+            for word in (
+                "mmc",
+                "i/o error",
+                "mount fail",
+                "watchdog",
+                "reboot",
+                "no space",
+                "corrupt",
+            )
+        }
+    result.update(
+        device_log_bytes=len(raw), device_log_pages=len(pages), device_log_complete=complete
+    )
+    return result
+
+
+def storage_status(config, health=False):
     settings = Settings.load(config)
     with CameraClient(settings) as camera:
         camera.send(816, bytes(4))
@@ -39,6 +113,7 @@ def storage_status(config):
             calendar = monthly_index(camera, now.year, now.month)
         except CameraError as error:
             calendar = {"calendar_error": error.code}
+        health_result = read_device_health(camera, settings.data_root) if health else {}
     if len(payload) < 56:
         raise CameraError("storage_response", "Storage response is truncated.")
     total, free = struct.unpack_from("<ii", payload, 40)
@@ -50,6 +125,7 @@ def storage_status(config):
         "anomaly": total < 0,
         "file_download_supported": bool(flags & 8),
         **calendar,
+        **health_result,
     }
 
 

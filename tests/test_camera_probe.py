@@ -146,3 +146,47 @@ def test_playback_primed_download_uses_same_session_and_always_stops(monkeypatch
     assert result["primed_download_error"] == "download_rejected"
     assert result["stop_requested"]
     assert struct.unpack_from("<I", peer.sent[-1][1], 4)[0] == 1
+
+
+def test_health_read_collects_log_pages_without_sending_a_setter(tmp_path):
+    peer = Peer(b"")
+    replies = iter(
+        [
+            struct.pack("<3i", 0, 2, 0),
+            struct.pack("<3i", 2, 1, 6) + b"reboot",
+            struct.pack("<3i", 2, 0, 3) + b"mmc",
+        ]
+    )
+    peer.response = lambda *args: next(replies)
+    result = camera_probe.read_device_health(peer, tmp_path)
+    assert result["record_type_raw"] == 2
+    assert result["device_log_complete"] and result["device_log_bytes"] == 9
+    path = tmp_path / "protocol-diagnostics/device-health-latest.log"
+    assert path.read_bytes() == b"mmcreboot"
+    assert path.stat().st_mode & 0o077 == 0
+    assert peer.sent == [(786, bytes(8)), (33224, bytes(8))]
+
+
+def test_health_read_keeps_missing_pages_incomplete(tmp_path):
+    peer = Peer(b"")
+    replies = iter([struct.pack("<3i", 0, 2, 0), struct.pack("<3i", 2, 0, 3) + b"mmc"])
+
+    def response(*args):
+        try:
+            return next(replies)
+        except StopIteration:
+            raise CameraError("read_timeout", "no second page") from None
+
+    peer.response = response
+    result = camera_probe.read_device_health(peer, tmp_path)
+    assert not result["device_log_complete"] and result["device_log_error"] == "read_timeout"
+    assert result["device_log_pages"] == 1
+
+
+def test_health_read_rejects_truncated_log_content(tmp_path):
+    peer = Peer(b"")
+    replies = iter([struct.pack("<3i", 0, 2, 0), struct.pack("<3i", 1, 0, 9) + b"mmc"])
+    peer.response = lambda *args: next(replies)
+    result = camera_probe.read_device_health(peer, tmp_path)
+    assert result["device_log_error"] == "device_log_response"
+    assert result["device_log_bytes"] == 0 and not result["device_log_complete"]

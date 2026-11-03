@@ -732,6 +732,9 @@ def test_zero_duration_source_is_refetched_instead_of_reencoded(tmp_path, monkey
     with backup.db.connection() as db:
         retry = db.execute("SELECT next_try FROM backup_retries WHERE id=?", (key,)).fetchone()
     assert 50 < retry[0] - time.time() <= 60
+    with backup.db.connection() as db:
+        last = db.execute("SELECT stage FROM camera_events ORDER BY id DESC LIMIT 1").fetchone()
+    assert last[0] == "prepare_failed"
 
 
 def test_recent_rejection_retries_before_deadline_but_history_is_bounded(tmp_path, monkeypatch):
