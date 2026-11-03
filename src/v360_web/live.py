@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import protocol as wire
 from .client import CameraClient
-from .config import Settings, read_private_json, write_private_json
+from .config import Settings, command_user_id, read_private_json, write_private_json
 from .errors import CameraError
 from .media import make_live_preview, probe, validate_decode
 
@@ -35,7 +35,7 @@ def capture_video(camera: CameraClient, target: Path, seconds: float, resolution
     Do not infer H.264 from those frame types. Other codecs are unsupported here.
     """
     validate_options(seconds, resolution)
-    user = 0 if camera.settings.shared else camera.settings.user_id
+    user = command_user_id(camera.settings)
     payload = wire.live_payload(resolution, user)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Exclusive creation prevents accidental overwriting, before waking the video stream.

@@ -101,3 +101,44 @@ preparation that round. Server mode now catches transient catalog transport erro
 and continues preparing already verified originals without another camera request.
 Authentication failures still stop the cycle. UI explicitly reports this degraded
 mode. Catalog completeness is preserved, never inferred from an offline cycle.
+
+
+## 2026-11-02 durable recovery follow-up
+
+Catalog refresh overwrites recording.updated_at, so it cannot serve as a retry
+clock. One persisted v2 migration releases existing transport backoffs once;
+subsequent failures use backup_retries.next_try directly. Recovery stores a fixed
+initial three-day floor per device; unfinished indexed clips do not disappear
+when they become four days old. Candidate order alternates newest and oldest.
+Transport setup retries at most five times within a forty-second exchange budget,
+with cancellation between attempts; authentication is never retried. Local-only
+cycles also validate downloaded_unverified files, with a strict no-network
+fallback flag. A started local conversion can finish past the five-minute round
+boundary; cancellation and individual conversion timeout remain effective.
+These changes require real failed-file download acceptance, separately from
+existing-original conversion and automated checks.
+
+
+Production candidate aa1b641 / docker.17 was deployed for bounded acceptance.
+169 Python checks and 7 JavaScript checks pass. Of three preselected November 2
+sdk_connect failures, 03:59:07 and 09:20:59 were newly downloaded, fully validated,
+converted, and served via authenticated MP4 range requests (206, 1024 bytes).
+00:37:17 still failed after five connection attempts with SDK -3. Thus this is
+partial recovery evidence, not reliable unattended download acceptance. Request
+an original-App open/close comparison to investigate low-power connectivity;
+no assumption that an omitted wake API exists. Feature remains unmerged pending
+further connection diagnosis. Private server records: recovery-targets-20261102.json
+and recovery-three-results-20261102.json under backups/.
+
+
+Follow-up: after user reported opening original-App live for about ten seconds
+and closing it, the remaining 00:37:17 target downloaded and validated in 27.3s.
+Its full browser copy also passed validation and authenticated 206 range delivery.
+All three preselected targets now have verified full web files. The next automatic
+cycle queried successfully and was observed downloading additional files (800
+originals and 382 full browser copies at check time). This temporal comparison
+supports investigating low-power/online state, but does not establish causality:
+connection recovery could also be intermittent and the exact App-close interval
+was not controlled. Independent sleeping-device wake and sustained unattended
+throughput remain unaccepted; keep feature branch open. Private detailed evidence:
+backups/app-open-comparison-20261102.json and app-comparison-acceptance-20261102.json.

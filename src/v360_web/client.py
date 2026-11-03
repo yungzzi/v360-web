@@ -8,9 +8,10 @@ from pathlib import Path
 
 from . import protocol as wire
 from .bridge import create_bridge
-from .config import Settings
+from .config import Settings, command_user_id
+from .diagnostics import record
 from .errors import CameraError
-from .progress import cancel_event, check_cancelled
+from .progress import cancel_event, check_cancelled, report
 
 
 class CameraClient:
@@ -32,18 +33,49 @@ class CameraClient:
         try:
             self.bridge.open()
             self.bridge.initialize(self.settings.sdk_init)
-            for attempt in range(2):
+            transport_timeout = getattr(self.bridge, "timeout", 40)
+            connect_deadline = time.monotonic() + 40
+            for attempt in range(5):
                 check_cancelled()
+                self.bridge.timeout = min(
+                    transport_timeout, max(0.1, connect_deadline - time.monotonic())
+                )
+                attempt_started = time.monotonic()
                 try:
                     self.session = self.bridge.connect(
                         self.settings.did, self.settings.connect_mode, self.settings.server_key
                     )
+                    record(
+                        getattr(self.settings, "data_root", None),
+                        "connection",
+                        attempt=attempt + 1,
+                        elapsed=round(time.monotonic() - attempt_started, 3),
+                        ok=True,
+                    )
                     break
                 except CameraError as error:
-                    if error.code != "sdk_connect" or error.sdk_code != -3 or attempt:
+                    record(
+                        getattr(self.settings, "data_root", None),
+                        "connection",
+                        attempt=attempt + 1,
+                        elapsed=round(time.monotonic() - attempt_started, 3),
+                        ok=False,
+                        error=error.code,
+                        sdk_code=error.sdk_code,
+                    )
+                    report("connecting", attempt=attempt + 1, sdk_code=error.sdk_code)
+                    if (
+                        error.code != "sdk_connect"
+                        or error.sdk_code != -3
+                        or attempt == 4
+                        or time.monotonic() + 1 >= connect_deadline
+                    ):
                         raise
-                    # Retry only transport setup, before sending any login command.
-                    time.sleep(1)
+                    # Only retry transport, never repeat a rejected device login.
+                    for _ in range(5):
+                        check_cancelled()
+                        time.sleep(0.2)
+            self.bridge.timeout = transport_timeout
             self.send(
                 wire.LOGIN,
                 wire.login_payload(
@@ -55,9 +87,16 @@ class CameraClient:
                 raise CameraError("login_response", "Device login response is truncated.")
             result = struct.unpack_from("<i", payload)[0]
             if result:
+                record(
+                    getattr(self.settings, "data_root", None),
+                    "authentication",
+                    ok=False,
+                    sdk_code=result,
+                )
                 raise CameraError(
                     "device_authentication", "Device did not accept its credentials.", result
                 )
+            record(getattr(self.settings, "data_root", None), "authentication", ok=True)
             return self
         except BaseException:
             self.close()
@@ -76,6 +115,11 @@ class CameraClient:
         finally:
             self.session = None
             self.bridge.close()
+            record(
+                getattr(self.settings, "data_root", None),
+                "closed",
+                forced=bool((getattr(self.bridge, "last_cleanup", None) or {}).get("forced")),
+            )
 
     def send(self, command: int, payload: bytes):
         self.bridge.write(
@@ -101,6 +145,7 @@ class CameraClient:
         deadline = time.monotonic() + self.settings.request_timeout
         events, seen = [], set()
         self.last_list_diagnostics = {"invalid_records": 0, "metadata_complete": True}
+        self.last_list_diagnostics["pages"] = []
         for _ in range(1024):
             payload = self.response(wire.LIST_RESPONSE, deadline)
             invalid = [] if self.settings.allow_invalid_record_dates else None
@@ -114,6 +159,17 @@ class CameraClient:
             identity = hashlib.sha256(payload).digest()
             if identity not in seen:
                 seen.add(identity)
+                self.last_list_diagnostics["pages"].append(
+                    {
+                        "declared_total": _total,
+                        "declared_count": struct.unpack_from("<i", payload, 8)[0],
+                        "index": _index,
+                        "finished": finished,
+                        "payload_bytes": len(payload),
+                        "valid_records": len(page),
+                        "invalid_records": len(invalid or []),
+                    }
+                )
                 events.extend(page)
                 if invalid:
                     self.last_list_diagnostics["invalid_records"] += len(invalid)
@@ -137,13 +193,26 @@ class CameraClient:
                 return events
         raise CameraError("list_unfinished", "Recording list did not receive an end marker.")
 
+    def stop_download(self, channel):
+        """APK stop-download handshake; never deletes a remote recording."""
+        self.send(33070, struct.pack("<I", channel))
+        reply = self.response(33071, time.monotonic() + self.settings.request_timeout)
+        if len(reply) < 4:
+            raise CameraError("download_stop_response", "Stop reply is truncated.")
+        return struct.unpack_from("<i", reply)[0]
+
     def download(
         self, channel: int, start: datetime, target: Path, weekday: int = 0, progress=None
     ):
-        user_id = 0 if self.settings.shared else self.settings.user_id
+        user_id = command_user_id(self.settings)
         self.send(wire.DOWNLOAD_REQUEST, wire.download_payload(channel, start, user_id, weekday))
         response = self.response(
             wire.DOWNLOAD_RESPONSE, time.monotonic() + self.settings.request_timeout
+        )
+        record(
+            getattr(self.settings, "data_root", None),
+            "download_response",
+            download_header=response[:40].hex(),
         )
         expected, actual_start, _, _, _ = wire.parse_download_response(response)
         if actual_start != start or expected > 2 * 1024**3:

@@ -93,6 +93,17 @@ def test_invalid_record_dates_require_opt_in_and_preserve_raw_page(bridge_server
             "invalid_records": 1,
             "metadata_complete": False,
             "raw_pages_saved": 1,
+            "pages": [
+                {
+                    "declared_total": 2,
+                    "declared_count": 2,
+                    "index": 0,
+                    "finished": True,
+                    "payload_bytes": 52,
+                    "valid_records": 1,
+                    "invalid_records": 1,
+                }
+            ],
         }
         raw_files = list((tmp_path / "protocol-diagnostics").glob("*.bin"))
         assert len(raw_files) == 1
@@ -183,3 +194,42 @@ def test_bridge_will_not_expose_credentials_to_non_loopback_address():
     with pytest.raises(CameraError) as error:
         AndroidBridge("192.168.1.2", 8766, TOKEN)
     assert error.value.code == "bridge_address"
+
+
+@pytest.mark.parametrize(
+    "mode,expected", [("connect-timeout-three", 4), ("connect-timeout-always", 5)]
+)
+def test_bounded_transport_recovery_before_login(bridge_server, monkeypatch, mode, expected):
+    monkeypatch.setattr("v360_web.client.time.sleep", lambda _: None)
+    with bridge_server(mode) as (port, state):
+        if mode.endswith("always"):
+            with pytest.raises(CameraError) as exc, CameraClient(settings(port)):
+                pass
+            assert exc.value.code == "sdk_connect"
+            assert not state["writes"]
+        else:
+            with CameraClient(settings(port)):
+                pass
+            assert len(state["writes"]) == 1
+        assert state["connect_calls"] == expected
+
+
+@pytest.mark.parametrize(
+    "prefix", ["MATE", "KEEP", "ZSYAS", "MNET", "BFEP", "CFET", "CFMT", "CFCD", "NFET"]
+)
+def test_legacy_command_identity_is_not_account_login_identity(prefix):
+    from types import SimpleNamespace
+
+    from v360_web.config import command_user_id
+
+    configured = SimpleNamespace(did=prefix + "-owned-test", shared=False, user_id=0x12345678)
+    assert command_user_id(configured) == 0
+    assert (
+        struct.unpack_from(
+            "<I", protocol.login_payload("owned-device", configured.user_id, False), 68
+        )[0]
+        == 0x12345678
+    )
+    assert protocol.download_payload(0, datetime(2026, 11, 2), command_user_id(configured))[
+        20:24
+    ] == bytes(4)

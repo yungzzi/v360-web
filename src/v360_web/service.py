@@ -1,28 +1,37 @@
 import hashlib
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
 from .client import CameraClient
 from .config import Settings
+from .diagnostics import record
 from .errors import CameraError
 from .maintenance import cleanup
 from .media import probe, validate_decode
+from .media_recovery import playable_source
 from .progress import report
 from .storage import admit, check_free
 from .store import RecordingStore
 
 
-def discover(config_path: Path, channel: int, start: datetime, end: datetime):
+def discover(config_path: Path, channel: int, start: datetime, end: datetime, prime_calendar=False):
     settings = Settings.load(config_path)
     report("querying")
     with CameraClient(settings) as camera:
+        calendar = {}
+        if prime_calendar:
+            from .camera_probe import monthly_index
+
+            calendar = monthly_index(camera, start.year, start.month, channel)
         events = camera.list_recordings(channel, start, end)
     store = RecordingStore(settings.data_root)
     keys = store.discover(settings.did, channel, events)
     diagnostics = camera.last_list_diagnostics
     store.save_catalog(settings.did, start, end, diagnostics)
     return {
+        **calendar,
         "records": len(keys),
         "ids": keys,
         "camera_validation": (
@@ -34,7 +43,7 @@ def discover(config_path: Path, channel: int, start: datetime, end: datetime):
     }
 
 
-def download(config_path: Path, key: str):
+def download(config_path: Path, key: str, *, local_only=False, camera=None, defer_validation=False):
     settings = Settings.load(config_path)
     store = RecordingStore(settings.data_root)
     item = store.get(key)
@@ -57,10 +66,24 @@ def download(config_path: Path, key: str):
                     digest.update(chunk)
             if digest.hexdigest() == item["sha256"]:
                 report("validating")
-                probe(local)
-                validate_decode(local)
-                store.update(key, "verified", error=None)
-                return {"id": key, "state": "verified", "rechecked_local_file": True}
+                try:
+                    with playable_source(local, item, store.root, probe(local)) as (usable, _, _):
+                        validate_decode(usable)
+                except CameraError:
+                    store.update(key, "failed", error="local_media_invalid")
+                    if local_only:
+                        raise CameraError(
+                            "local_media_invalid",
+                            "Local original requires a fresh device transfer.",
+                        ) from None
+                else:
+                    store.update(key, "verified", error=None)
+                    return {"id": key, "state": "verified", "rechecked_local_file": True}
+    if local_only:
+        raise CameraError(
+            "local_original_invalid",
+            "Local original cannot be validated without fetching it again.",
+        )
     temporary = store.root / "media" / f"{key}.part"
     last_report = 0
 
@@ -81,10 +104,12 @@ def download(config_path: Path, key: str):
             last_report = now
 
     report("connecting")
+    if item.get("sha256"):
+        record(store.root, "refetch_started", key=key, source_sha256=item["sha256"])
     store.update(key, "downloading", error=None)
     try:
-        with CameraClient(settings) as camera:
-            result = camera.download(
+        with nullcontext(camera) if camera is not None else CameraClient(settings) as peer:
+            result = peer.download(
                 item["channel"],
                 datetime.fromisoformat(item["start_local"]),
                 temporary,
@@ -100,10 +125,14 @@ def download(config_path: Path, key: str):
             path=str(destination.relative_to(store.root)),
             **{k: result[k] for k in ["bytes", "sha256"]},
         )
+        record(store.root, "downloaded", key=key, ok=True)
+        if defer_validation:
+            return {"id": key, "state": "downloaded_unverified", **result}
         info = probe(destination)
         report("validating")
-        validate_decode(destination)
-        store.update(key, "verified")
+        with playable_source(destination, store.get(key), store.root, info) as (usable, info, _):
+            validate_decode(usable)
+        store.update(key, "verified", error=None)
         return {
             "id": key,
             "state": "verified",
@@ -123,3 +152,44 @@ def download(config_path: Path, key: str):
         raise CameraError(
             "local_storage", "Could not write or finalize the local recording."
         ) from error
+
+
+class DownloadBatch:
+    """Own one short camera session; published raw files validate independently."""
+
+    def __init__(self, config):
+        self.config = config
+        self.camera = None
+        self.count = 0
+        self.started = 0
+
+    def close(self):
+        if self.camera is not None:
+            self.camera.close()
+            self.camera = None
+        self.count = 0
+
+    def download(self, key):
+        settings = Settings.load(self.config)
+        try:
+            if self.camera is not None and (
+                self.count >= 3 or time.monotonic() - self.started >= 120
+            ):
+                self.close()
+            if self.camera is None:
+                self.camera = CameraClient(settings)
+                self.camera.__enter__()
+                self.started = time.monotonic()
+            result = download(self.config, key, camera=self.camera, defer_validation=True)
+            self.count += 1
+            if self.count >= 3:
+                self.close()
+            return result
+        except BaseException as error:
+            self.close()
+            if isinstance(error, CameraError):
+                store = RecordingStore(settings.data_root)
+                item = store.get(key)
+                if item and item["state"] != "downloaded_unverified":
+                    store.update(key, "failed", error=error.code)
+            raise

@@ -33,6 +33,10 @@ class RecordingStore:
             for name, definition in [
                 ("pinned", "INTEGER NOT NULL DEFAULT 0"),
                 ("saved_at", "TEXT"),
+                ("first_seen_at", "TEXT"),
+                ("downloaded_at", "TEXT"),
+                ("validated_at", "TEXT"),
+                ("web_ready_at", "TEXT"),
             ]:
                 if name not in columns:
                     db.execute(f"ALTER TABLE recordings ADD COLUMN {name} {definition}")
@@ -64,8 +68,8 @@ class RecordingStore:
                 key = hashlib.sha256(identity.encode()).hexdigest()[:32]
                 db.execute(
                     """INSERT INTO recordings
-                    (id,device_id,channel,start_local,duration_raw,event_type,remote_status,weekday,updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                    (id,device_id,channel,start_local,duration_raw,event_type,remote_status,weekday,updated_at,first_seen_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
                     duration_raw=excluded.duration_raw,remote_status=excluded.remote_status,
                     updated_at=excluded.updated_at""",
                     (
@@ -77,6 +81,7 @@ class RecordingStore:
                         event.event_type,
                         event.status,
                         event.weekday,
+                        self.timestamp(),
                         self.timestamp(),
                     ),
                 )
@@ -186,11 +191,21 @@ class RecordingStore:
         if not set(values) <= allowed:
             raise ValueError("Unsupported recording update")
         updates = {"state": state, "updated_at": self.timestamp(), **values}
+        if state == "downloaded_unverified":
+            updates["downloaded_at"] = self.timestamp()
         if state == "verified":
             updates["saved_at"] = self.timestamp()
+            updates["validated_at"] = self.timestamp()
         with self.connection() as db:
             assignments = ",".join(f"{name}=?" for name in updates)
             db.execute(f"UPDATE recordings SET {assignments} WHERE id=?", [*updates.values(), key])
+
+    def mark_web_ready(self, key):
+        with self.connection() as db:
+            db.execute(
+                "UPDATE recordings SET web_ready_at=coalesce(web_ready_at,?) WHERE id=? AND state='verified'",
+                (self.timestamp(), key),
+            )
 
     def pin(self, key, value):
         with self.connection() as db:

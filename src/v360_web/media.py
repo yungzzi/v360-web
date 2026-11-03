@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 import time
@@ -63,6 +64,16 @@ def probe(path: Path):
     ):
         raise CameraError("media_unrecognized", "Downloaded bytes are not recognized as video.")
     return value
+
+
+def validate_recording(info):
+    """A decodable still frame is not a complete playable recording."""
+    try:
+        duration = float(info.get("format", {}).get("duration", 0))
+    except (TypeError, ValueError):
+        duration = 0
+    if not math.isfinite(duration) or not 0 < duration <= 3600:
+        raise CameraError("media_incomplete", "Original has no supported playable duration.")
 
 
 def validate_decode(path: Path):

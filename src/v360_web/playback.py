@@ -4,13 +4,17 @@ import math
 import os
 import re
 import subprocess
+import threading
 import time
+from functools import wraps
 from pathlib import Path
 
 from .config import Settings, read_private_json, write_private_json
+from .diagnostics import record
 from .errors import CameraError
 from .maintenance import cleanup, protect
 from .media import find_tool, probe, validate_decode
+from .media_recovery import playable_source
 from .progress import check_cancelled, report
 from .storage import admit, check_free
 from .store import RecordingStore
@@ -46,6 +50,24 @@ def ready(root: Path, key: str, start=None):
     return None
 
 
+ENCODER_LOCK = threading.Lock()
+
+
+def serial_encoder(function):
+    @wraps(function)
+    def serialized(*args, **kwargs):
+        while not ENCODER_LOCK.acquire(timeout=0.2):
+            check_cancelled()
+        try:
+            check_cancelled()
+            return function(*args, **kwargs)
+        finally:
+            ENCODER_LOCK.release()
+
+    return serialized
+
+
+@serial_encoder
 def prepare(config: Path, key: str, start=None):
     if start is not None and (type(start) is not int or not 0 <= start < 3600 or start % 30):
         raise CameraError("preview_start", "Invalid playback window.")
@@ -61,9 +83,15 @@ def prepare(config: Path, key: str, start=None):
     if start is not None and ready(root, key, start):
         _, manifest, _ = paths(root, key, start)
         return {"id": key, "state": "ready", **read_private_json(manifest), "full": False}
+    record(root, "prepare_started", key=key)
     report("preparing_playback")
     protect(root, key)
-    info = probe(source)
+    with playable_source(source, item, root, probe(source)) as (usable, info, recovery):
+        return prepare_source(settings, store, item, usable, key, start, info, recovery)
+
+
+def prepare_source(settings, store, item, source, key, start, info, recovery):
+    root = settings.data_root
     duration = float(info.get("format", {}).get("duration", 0))
     if not math.isfinite(duration) or not 0 < duration <= 3600:
         raise CameraError("preview_duration", "Recording duration is unsupported for preview.")
@@ -210,9 +238,13 @@ def prepare(config: Path, key: str, start=None):
             "start": start or 0,
             "seconds": duration,
             "source_seconds": source_duration,
+            **({"source_recovery": recovery} if recovery else {}),
         },
     )
     temporary_manifest.replace(manifest)
+    if start is None:
+        store.mark_web_ready(key)
+        record(root, "web_ready", key=key, ok=True)
     return {
         "id": key,
         "state": "ready",

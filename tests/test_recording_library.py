@@ -321,3 +321,19 @@ def test_prefetch_yields_to_foreground_and_duplicate_cannot_displace_it(prepared
         assert fg.status_code == 202 and cancelled.is_set()
     assert JobStore(root).get_job(bg["id"])["state"] == "failed"
     assert JobStore(root).get_job(fg.json()["id"])["result"]["start"] == 60
+
+
+def test_server_cleanup_without_pressure_does_not_inspect_each_clip(prepared, monkeypatch):
+    from v360_web import maintenance
+    from v360_web.backup_policy import BackupPolicy
+
+    root, store, key, _ = prepared
+    BackupPolicy(root).write("policy", {"mode": "server", "enabled": True})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("No deletion is needed; do not repeatedly scan per-clip files")
+
+    monkeypatch.setattr(maintenance, "preview_suffixes", forbidden)
+    result = maintenance.cleanup(root, 1024)
+    assert result == {"removed_recordings": 0, "removed_cache_bytes": 0}
+    assert store.media_path(key).is_file()

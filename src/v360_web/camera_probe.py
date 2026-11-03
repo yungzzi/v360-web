@@ -1,0 +1,367 @@
+"""Authenticated, bounded storage and SD-playback diagnostics."""
+
+import base64
+import hashlib
+import struct
+import subprocess
+import threading
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from .client import CameraClient
+from .config import Settings, command_user_id, old_device_platform
+from .errors import CameraError
+from .media import find_tool
+from .protocol import encode_time
+from .store import RecordingStore
+
+
+def monthly_index(camera, year, month, channel=0):
+    # LiveViewModel.getMonthFlag(year, month, channel) selects physical SD disk 1.
+    camera.send(1287, struct.pack("<4I", 1, year, month, channel))
+    payload = camera.response(1288, time.monotonic() + camera.settings.request_timeout)
+    if len(payload) < 36:
+        raise CameraError("sd_calendar_response", "SD monthly directory response is truncated.")
+    return {
+        "disk_flag": struct.unpack_from("<I", payload)[0],
+        "calendar_flags": list(payload[4:36]),
+    }
+
+
+def read_device_health(camera, root):
+    """Read normal record settings and bounded log pages; never send a setter."""
+    result = {}
+    try:
+        camera.send(786, bytes(8))
+        reply = camera.response(787, time.monotonic() + 5)
+        if len(reply) < 12:
+            raise CameraError("record_config_response", "Recording settings are truncated.")
+        channel, mode = struct.unpack_from("<ii", reply)
+        if channel != 0:
+            raise CameraError(
+                "record_config_response", "Device returned unsupported recording settings."
+            )
+        result["record_channel"], result["record_type_raw"] = channel, mode
+    except CameraError as error:
+        result["record_config_error"] = error.code
+    pages, raw = {}, bytearray()
+    total, complete = None, False
+    try:
+        camera.send(33224, bytes(8))
+        deadline = time.monotonic() + 10
+        for _ in range(32):
+            reply = camera.response(33225, deadline)
+            if len(reply) < 12:
+                raise CameraError("device_log_response", "Device log page is truncated.")
+            count, sequence, size = struct.unpack_from("<iii", reply)
+            if not 0 <= size <= len(reply) - 12 or count < 0 or sequence < 0:
+                raise CameraError("device_log_response", "Device log page fields are invalid.")
+            if total is not None and total != count:
+                raise CameraError("device_log_response", "Device log page total changed.")
+            total = count
+            content = reply[12 : 12 + size]
+            if sequence in pages and pages[sequence] != content:
+                raise CameraError("device_log_response", "Device log page identity changed.")
+            if sequence not in pages:
+                if len(raw) + size > 256 * 1024:
+                    break
+                pages[sequence] = content
+                raw.extend(content)
+            if count == 0 and size == 0:
+                complete = True
+                break
+            if len(pages) == count and set(pages) in (set(range(count)), set(range(1, count + 1))):
+                complete = True
+                break
+    except CameraError as error:
+        result["device_log_error"] = error.code
+    if raw:
+        folder = root / "protocol-diagnostics"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = folder / "device-health-latest.log"
+        # Root is the configured private data directory, never user-selected.
+        if target.is_symlink():
+            raise CameraError("device_log_path", "Private log path must not be a symlink.")
+        with target.open("wb") as output:
+            import os
+
+            os.fchmod(output.fileno(), 0o600)
+            for sequence in sorted(pages):
+                output.write(pages[sequence])
+        text = raw.decode("utf-8", errors="replace").lower()
+        result["log_keyword_counts"] = {
+            word: text.count(word)
+            for word in (
+                "mmc",
+                "i/o error",
+                "mount fail",
+                "watchdog",
+                "reboot",
+                "no space",
+                "corrupt",
+            )
+        }
+    result.update(
+        device_log_bytes=len(raw), device_log_pages=len(pages), device_log_complete=complete
+    )
+    return result
+
+
+def storage_status(config, health=False):
+    settings = Settings.load(config)
+    with CameraClient(settings) as camera:
+        camera.send(816, bytes(4))
+        payload = camera.response(817, time.monotonic() + settings.request_timeout)
+        now = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+        try:
+            calendar = monthly_index(camera, now.year, now.month)
+        except CameraError as error:
+            calendar = {"calendar_error": error.code}
+        health_result = read_device_health(camera, settings.data_root) if health else {}
+    if len(payload) < 56:
+        raise CameraError("storage_response", "Storage response is truncated.")
+    total, free = struct.unpack_from("<ii", payload, 40)
+    flags = payload[55]
+    return {
+        "total_raw": total,
+        "free_raw": free,
+        "has_card": total > 0,
+        "anomaly": total < 0,
+        "file_download_supported": bool(flags & 8),
+        **calendar,
+        **health_result,
+    }
+
+
+def playback_probe(config, key, stream_type=None, capture=False, test_download=False):
+    settings = Settings.load(config)
+    item = RecordingStore(settings.data_root).get(key)
+    if not item or item["device_id"] != settings.did:
+        raise CameraError("recording_missing", "Recording is not indexed for this device.")
+    # Normal single-camera overload uses the directory event byte as optSeq;
+    # the older NVR overload's stream-type byte is a different contract.
+    event = item["event_type"]
+    default_selector = (1 if event in (1, 3, 4) else 2) if old_device_platform(settings) else event
+    selector = default_selector if stream_type is None else stream_type
+    payload = bytearray(
+        struct.pack("<III", item["channel"], 16, 0)
+        + encode_time(datetime.fromisoformat(item["start_local"]), item["weekday"])
+        + bytes([selector, 0, 0, 0])
+    )
+    struct.pack_into("<H", payload, 22, (command_user_id(settings)) & 0xFFFF)
+    result = {}
+    phase = "control_response"
+    with CameraClient(settings) as camera:
+        # Stop and acknowledge any prior playback before creating this reader.
+        # ForceClose alone must not stand in for a confirmed device stop.
+        initial_stop = bytearray(payload)
+        struct.pack_into("<I", initial_stop, 4, 1)
+        camera.send(794, initial_stop)
+        stopped = camera.response(795, time.monotonic() + settings.request_timeout)
+        result["initial_stop_confirmed"] = (
+            len(stopped) >= 8 and struct.unpack_from("<i", stopped)[0] == 1
+        )
+        for _ in range(16):
+            drained = camera.bridge.rpc(
+                "read", session=camera.session, channel=3, size=16384, timeout_ms=50
+            )
+            if drained["ret"] not in (0, -3):
+                break
+            if not base64.b64decode(drained.get("data", ""), validate=True):
+                break
+        frame = bytearray()
+        frame_channel = []
+        done = threading.Event()
+        halt = threading.Event()
+        read_errors = []
+
+        def first_header():
+            deadline = time.monotonic() + 20
+            try:
+                buffers = {channel: bytearray() for channel in (3, 2, 5)}
+                while not halt.is_set() and time.monotonic() < deadline and len(frame) < 16:
+                    for channel, buffer in buffers.items():
+                        reply = camera.bridge.rpc(
+                            "read",
+                            session=camera.session,
+                            channel=channel,
+                            size=16 - len(buffer),
+                            timeout_ms=50,
+                        )
+                        if reply["ret"] not in (0, -3):
+                            raise CameraError(
+                                "sd_frame_read", "SD channel read failed.", reply["ret"]
+                            )
+                        chunk = base64.b64decode(reply.get("data", ""), validate=True)
+                        if len(chunk) > 16 - len(buffer):
+                            raise CameraError("sd_frame_read", "SD frame header overflow.")
+                        buffer.extend(chunk)
+                        if len(buffer) == 16:
+                            frame.extend(buffer)
+                            frame_channel.append(channel)
+                            break
+                    if len(frame) < 16:
+                        halt.wait(0.05)
+            except (CameraError, OSError, ValueError) as error:
+                read_errors.append(getattr(error, "code", "sd_frame_read"))
+            finally:
+                done.set()
+
+        reader = threading.Thread(target=first_header, name="sd-probe-reader", daemon=True)
+        reader.start()
+        try:
+            camera.send(794, payload)
+            reply = camera.response(795, time.monotonic() + settings.request_timeout)
+            if len(reply) < 12:
+                raise CameraError("sd_playback_response", "SD playback reply is truncated.")
+            command, code = struct.unpack_from("<ii", reply)
+            result.update(
+                command=command, result=code, duration_raw=struct.unpack_from("<h", reply, 8)[0]
+            )
+            if command == 16 and code == 0:
+                phase = "first_frame"
+                done.wait(20)
+                if len(frame) != 16:
+                    raise CameraError(
+                        read_errors[0] if read_errors else "read_timeout",
+                        "No complete SD frame header arrived.",
+                    )
+                flag, size, pts, kind = struct.unpack("<4I", frame)
+                result.update(
+                    frame_channel=frame_channel[0],
+                    frame_flag=flag,
+                    frame_size=size,
+                    frame_pts=pts,
+                    frame_type=kind,
+                )
+                expected_start = int(
+                    datetime.fromisoformat(item["start_local"])
+                    .replace(tzinfo=ZoneInfo("Asia/Hong_Kong"))
+                    .timestamp()
+                )
+                result["frame_time_in_requested_range"] = (
+                    expected_start - 3
+                    <= pts
+                    <= expected_start + max(0, min(item["duration_raw"], 3600)) + 3
+                )
+                if capture and 0 < size <= 2 * 1024**2:
+                    if kind == 16384:
+                        ext = camera.bridge.read_exact(
+                            camera.session, frame_channel[0], 16, time.monotonic() + 10
+                        )
+                        kind = struct.unpack_from("<I", ext)[0]
+                    content = camera.bridge.read_exact(
+                        camera.session, frame_channel[0], size, time.monotonic() + 15
+                    )
+                    if kind not in (1, 17) or not content.startswith((b"\0\0\1", b"\0\0\0\1")):
+                        raise CameraError(
+                            "sd_probe_format", "First SD frame is not a supported key frame."
+                        )
+                    folder = settings.data_root / "protocol-diagnostics" / "sd-frame"
+                    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    name = hashlib.sha256(key.encode()).hexdigest()[:32]
+                    raw = folder / (name + (".hevc" if kind == 17 else ".h264"))
+                    raw.write_bytes(content)
+                    raw.chmod(0o600)
+                    picture = folder / (name + ".jpg")
+                    converted = subprocess.run(
+                        [
+                            find_tool("ffmpeg"),
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-y",
+                            "-i",
+                            str(raw),
+                            "-frames:v",
+                            "1",
+                            str(picture),
+                        ],
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    result["frame_decoded"] = converted.returncode == 0 and picture.is_file()
+                    if result["frame_decoded"]:
+                        picture.chmod(0o600)
+                        result["diagnostic_picture"] = str(picture.relative_to(settings.data_root))
+        except (CameraError, subprocess.TimeoutExpired) as error:
+            result.update(
+                probe_error=getattr(error, "code", "sd_probe_decode_timeout"),
+                phase=phase,
+                sdk_code=getattr(error, "sdk_code", None),
+            )
+        finally:
+            halt.set()
+            reader.join(timeout=2)
+            if test_download and result.get("command") == 16 and result.get("result") == 0:
+                # Controlled compatibility test: original App downloads while its
+                # SD playback session is already open. File identity and source
+                # validation remain the normal archive pipeline's responsibility.
+                from . import service
+
+                try:
+                    result["primed_download"] = service.download(
+                        config, key, camera=camera, defer_validation=True
+                    )
+                except CameraError as error:
+                    result["primed_download_error"] = error.code
+                    result["primed_download_sdk_code"] = error.sdk_code
+            stop = bytearray(payload)
+            struct.pack_into("<I", stop, 4, 1)
+            try:
+                camera.send(794, stop)
+                result["stop_requested"] = True
+                stopped = camera.response(795, time.monotonic() + min(5, settings.request_timeout))
+                result["stop_confirmed"] = (
+                    len(stopped) >= 8 and struct.unpack_from("<i", stopped)[0] == 1
+                )
+            except CameraError:
+                result["stop_requested"] = False
+    return result
+
+
+def download_probe(config, key, stop_first=False):
+    """Compare APK lifecycle on an actual file, without promoting diagnostic bytes."""
+    settings = Settings.load(config)
+    item = RecordingStore(settings.data_root).get(key)
+    if not item or item["device_id"] != settings.did:
+        raise CameraError("recording_missing", "Recording is not indexed for this device.")
+    folder = settings.data_root / "protocol-diagnostics"
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Stable owned name; camera-job lock serializes probes. Never overwrite an original.
+    target = folder / "download-lifecycle.part"
+    if target.is_symlink():
+        raise CameraError("probe_path", "Diagnostic path must not be a symlink.")
+    result = {"stop_first": stop_first, "transferred": False}
+    settings.transfer_timeout = min(settings.transfer_timeout, 30)
+
+    def bounded(written, total):
+        if total > 16 * 1024**2:
+            raise CameraError("probe_size", "Diagnostic transfer exceeds 16 MiB.")
+        from .storage import check_free
+        check_free(settings.data_root, max(0, total - written))
+
+    try:
+        with CameraClient(settings) as camera:
+            try:
+                if stop_first:
+                    result["initial_stop_result"] = camera.stop_download(item["channel"])
+                    if result["initial_stop_result"] != 0:
+                        raise CameraError("download_stop_rejected", "Device did not accept stop.")
+                transfer = camera.download(
+                    item["channel"], datetime.fromisoformat(item["start_local"]),
+                    target, item["weekday"], progress=bounded,
+                )
+                result.update(transferred=True, bytes=transfer["bytes"], sha256=transfer["sha256"])
+            except CameraError as error:
+                result.update(error=error.code, sdk_code=error.sdk_code)
+            finally:
+                try:
+                    result["final_stop_result"] = camera.stop_download(item["channel"])
+                except CameraError as error:
+                    result["stop_error"] = error.code
+        return result
+    finally:
+        target.unlink(missing_ok=True)

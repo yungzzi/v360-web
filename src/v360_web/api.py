@@ -29,18 +29,30 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from . import __version__, battery, live, maintenance, playback, progress, service, storage
+from . import (
+    __version__,
+    battery,
+    camera_probe,
+    live,
+    maintenance,
+    playback,
+    progress,
+    service,
+    storage,
+)
 from .backup import BackupManager
 from .config import Settings
 from .errors import CameraError
 from .jobs import JobStore
 from .lenses import views
+from .publication import Publication, retry_once
 from .sessions import COOKIE, REMEMBER_SECONDS, SessionStore
 from .store import RecordingStore
 from .streaming import StreamManager
 
 
 class ListRequest(BaseModel):
+    prime_calendar: bool = False
     channel: int = Field(ge=0, le=255)
     start: datetime
     end: datetime
@@ -81,6 +93,7 @@ def create_app(
     if len(access_token) < 32:
         raise ValueError("Web access token must contain at least 32 characters")
     store = RecordingStore(root)
+    publication = Publication(root)
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v360-camera")
     lock = threading.Lock()
     prefetch_guard = threading.Lock()
@@ -495,6 +508,9 @@ def create_app(
             row.pop("path", None)
             row["original_ready"] = store.media_path(row["id"]) is not None
             row["playback_ready"] = playback.ready(root, row["id"]) is not None
+            if publication.enabled():
+                row["publication"] = publication.info(row)
+                row["playback_ready"] = row["playback_ready"] and row["publication"]["released"]
         return {
             "items": items,
             "total": total,
@@ -517,11 +533,17 @@ def create_app(
             item["playback_ready"] = (
                 item["original_ready"] and playback.ready(root, item["id"]) is not None
             )
+        if publication.enabled():
+            value["items"] = [item for item in value["items"] if publication.published(store.get(item["id"]))]
+            value["total"] = len(value["items"])
         value["catalog"] = store.catalog(did, day)
         return value
 
     @app.get("/api/recordings/{key}/file", dependencies=[Depends(authorize_media)])
     def recording_file(key: str):
+        item = store.get(key)
+        if item and not publication.published(item):
+            raise HTTPException(409, "Recording batch has not been published")
         maintenance.protect(root, key)
         path = store.media_path(key)
         if path is None:
@@ -532,6 +554,9 @@ def create_app(
 
     @app.get("/api/recordings/{key}/preview", dependencies=[Depends(authorize_media)])
     def recording_preview(key: str):
+        item = store.get(key)
+        if item and not publication.published(item):
+            raise HTTPException(409, "Recording batch has not been published")
         maintenance.protect(root, key)
         path = playback.ready(root, key)
         if path is None:
@@ -540,6 +565,9 @@ def create_app(
 
     @app.get("/api/recordings/{key}/window", dependencies=[Depends(authorize_media)])
     def recording_window(key: str, start: int = Query(ge=0, lt=3600, multiple_of=30)):
+        item = store.get(key)
+        if item and not publication.published(item):
+            raise HTTPException(409, "Recording batch has not been published")
         maintenance.protect(root, key)
         path = playback.ready(root, key, start)
         if path is None:
@@ -598,11 +626,54 @@ def create_app(
             raise HTTPException(
                 422, "Use an ordered range of device-local times without UTC offsets"
             )
-        return submit(service.discover, body.channel, body.start, body.end)
+        return submit(service.discover, body.channel, body.start, body.end, body.prime_calendar)
+
+    @app.put("/api/publication", dependencies=[Depends(authorize)])
+    def publication_setting(enabled: bool):
+        publication.enable(enabled)
+        return {"enabled": publication.enabled()}
+
+    @app.get("/api/publication", dependencies=[Depends(authorize)])
+    def publication_status(day: date):
+        groups = {}
+        stopped = []
+        for item in store.list():
+            if not item["start_local"].startswith(day.isoformat()) or item["state"] == "evicted":
+                continue
+            info = publication.info(item)
+            ready = bool(playback.ready(root, item["id"]))
+            group = groups.setdefault(info["batch_start"], {**{k: info[k] for k in ("batch_start", "batch_end", "release_at", "released")}, "known": 0, "ready": 0, "stopped": 0})
+            group["known"] += 1
+            group["ready"] += int(ready)
+            if not ready and info["stopped_reason"]:
+                group["stopped"] += 1
+                stopped.append({"id": item["id"], "start_local": item["start_local"], "error": item["error"], **info})
+        return {"enabled": publication.enabled(), "batches": sorted(groups.values(), key=lambda g: g["batch_start"]), "stopped": stopped}
+
+    @app.post("/api/jobs/retry-once/{key}", status_code=202, dependencies=[Depends(authorize)])
+    def publication_retry(key: str):
+        return submit(retry_once, key)
+
+    @app.post("/api/jobs/storage-check", status_code=202, dependencies=[Depends(authorize)])
+    def storage_check_job(health: bool = False):
+        return submit(camera_probe.storage_status, health)
+
+    @app.post("/api/jobs/sd-probe/{key}", status_code=202, dependencies=[Depends(authorize)])
+    def sd_probe_job(
+        key: str,
+        stream_type: int | None = Query(default=None, ge=0, le=255),
+        capture: bool = False,
+        test_download: bool = False,
+    ):
+        return submit(camera_probe.playback_probe, key, stream_type, capture, test_download)
+
+    @app.post("/api/jobs/download-probe/{key}", status_code=202, dependencies=[Depends(authorize)])
+    def download_probe_job(key: str, stop_first: bool = False):
+        return submit(camera_probe.download_probe, key, stop_first)
 
     @app.post("/api/jobs/download/{key}", status_code=202, dependencies=[Depends(authorize)])
     def download_job(key: str):
-        return submit(service.download, key)
+        return submit(retry_once if publication.enabled() else service.download, key)
 
     @app.post("/api/jobs/live", status_code=202, dependencies=[Depends(authorize)])
     def live_job(body: LiveRequest):
