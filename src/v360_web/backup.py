@@ -130,7 +130,11 @@ class BackupManager:
             self.update(prepare_state="waiting", last_prepare_error=None)
         except CameraError as error:
             if error.code not in ("backup_yielded", "interrupted"):
-                if error.code in ("preview_duration", "media_incomplete"):
+                if error.code in (
+                    "preview_duration",
+                    "media_incomplete",
+                    "source_recovery_unavailable",
+                ):
                     # A one-frame/zero-duration source passes a decode-only check.
                     # Re-fetch its source instead of retrying the same conversion forever.
                     self.db.update(key, "failed", error="local_media_invalid")
@@ -456,6 +460,20 @@ class BackupManager:
                 )
                 return
             settings = Settings.load(self.config)
+            if not self.db.read("source_recovery_migration_v1", False):
+                # Reconsider already-owned bytes once with the conservative index
+                # repair validator. This is not a new download or a verified state.
+                with self.db.connection() as db:
+                    db.execute(
+                        "UPDATE recordings SET state='downloaded_unverified' WHERE state='failed' "
+                        "AND path IS NOT NULL AND sha256 IS NOT NULL AND bytes>0 AND device_id=?",
+                        (settings.did,),
+                    )
+                    db.execute(
+                        "UPDATE backup_retries SET next_try=min(next_try,?) WHERE id LIKE 'prepare:%'",
+                        (time.time(),),
+                    )
+                self.db.write("source_recovery_migration_v1", True)
             end = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None) - timedelta(
                 seconds=60
             )

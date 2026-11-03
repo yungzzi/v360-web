@@ -9,7 +9,8 @@ from .config import Settings
 from .diagnostics import record
 from .errors import CameraError
 from .maintenance import cleanup
-from .media import probe, validate_decode, validate_recording
+from .media import probe, validate_decode
+from .media_recovery import playable_source
 from .progress import report
 from .storage import admit, check_free
 from .store import RecordingStore
@@ -66,8 +67,8 @@ def download(config_path: Path, key: str, *, local_only=False, camera=None, defe
             if digest.hexdigest() == item["sha256"]:
                 report("validating")
                 try:
-                    validate_recording(probe(local))
-                    validate_decode(local)
+                    with playable_source(local, item, store.root, probe(local)) as (usable, _, _):
+                        validate_decode(usable)
                 except CameraError:
                     store.update(key, "failed", error="local_media_invalid")
                     if local_only:
@@ -128,9 +129,9 @@ def download(config_path: Path, key: str, *, local_only=False, camera=None, defe
         if defer_validation:
             return {"id": key, "state": "downloaded_unverified", **result}
         info = probe(destination)
-        validate_recording(info)
         report("validating")
-        validate_decode(destination)
+        with playable_source(destination, store.get(key), store.root, info) as (usable, info, _):
+            validate_decode(usable)
         store.update(key, "verified", error=None)
         return {
             "id": key,

@@ -156,6 +156,9 @@ def preview_suffixes(root, key):
     """Only owned, bounded window names share the parent recording lease/quota."""
     yield ".mp4"
     yield ".json"
+    yield ".repair.hevc"
+    yield ".repair.alaw"
+    yield ".repair.mp4"
     for path in (root / "previews").glob(key + ".s*"):
         suffix = path.name[len(key) :]
         if re.fullmatch(r"\.s[0-9]{4}\.(mp4|json|partial\.mp4)", suffix):

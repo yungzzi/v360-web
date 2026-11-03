@@ -14,6 +14,7 @@ from .diagnostics import record
 from .errors import CameraError
 from .maintenance import cleanup, protect
 from .media import find_tool, probe, validate_decode
+from .media_recovery import playable_source
 from .progress import check_cancelled, report
 from .storage import admit, check_free
 from .store import RecordingStore
@@ -85,7 +86,12 @@ def prepare(config: Path, key: str, start=None):
     record(root, "prepare_started", key=key)
     report("preparing_playback")
     protect(root, key)
-    info = probe(source)
+    with playable_source(source, item, root, probe(source)) as (usable, info, recovery):
+        return prepare_source(settings, store, item, usable, key, start, info, recovery)
+
+
+def prepare_source(settings, store, item, source, key, start, info, recovery):
+    root = settings.data_root
     duration = float(info.get("format", {}).get("duration", 0))
     if not math.isfinite(duration) or not 0 < duration <= 3600:
         raise CameraError("preview_duration", "Recording duration is unsupported for preview.")
@@ -232,6 +238,7 @@ def prepare(config: Path, key: str, start=None):
             "start": start or 0,
             "seconds": duration,
             "source_seconds": source_duration,
+            **({"source_recovery": recovery} if recovery else {}),
         },
     )
     temporary_manifest.replace(manifest)

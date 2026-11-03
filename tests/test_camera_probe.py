@@ -190,3 +190,12 @@ def test_health_read_rejects_truncated_log_content(tmp_path):
     result = camera_probe.read_device_health(peer, tmp_path)
     assert result["device_log_error"] == "device_log_response"
     assert result["device_log_bytes"] == 0 and not result["device_log_complete"]
+
+
+def test_unsupported_record_settings_are_not_presented_as_a_real_mode(tmp_path):
+    peer = Peer(b"")
+    replies = iter([struct.pack("<3i", -1604601120, 17, 0), struct.pack("<3i", 0, 0, 0)])
+    peer.response = lambda *args: next(replies)
+    result = camera_probe.read_device_health(peer, tmp_path)
+    assert result["record_config_error"] == "record_config_response"
+    assert "record_type_raw" not in result

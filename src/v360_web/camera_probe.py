@@ -37,7 +37,12 @@ def read_device_health(camera, root):
         reply = camera.response(787, time.monotonic() + 5)
         if len(reply) < 12:
             raise CameraError("record_config_response", "Recording settings are truncated.")
-        result["record_channel"], result["record_type_raw"] = struct.unpack_from("<ii", reply)
+        channel, mode = struct.unpack_from("<ii", reply)
+        if channel != 0:
+            raise CameraError(
+                "record_config_response", "Device returned unsupported recording settings."
+            )
+        result["record_channel"], result["record_type_raw"] = channel, mode
     except CameraError as error:
         result["record_config_error"] = error.code
     pages, raw = {}, bytearray()
