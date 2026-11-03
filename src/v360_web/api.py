@@ -503,13 +503,14 @@ def create_app(
             except CameraError as error:
                 raise HTTPException(503, "Camera profile unavailable") from error
         total, items = store.library(day, offset, limit, did)
+        batched, publication_info = publication.infos(items)
         for row in items:
+            row["original_ready"] = store.media_path(row["id"], item=row) is not None
+            row["playback_ready"] = playback.ready(root, row["id"], item=row) is not None
             row.pop("device_id", None)
             row.pop("path", None)
-            row["original_ready"] = store.media_path(row["id"]) is not None
-            row["playback_ready"] = playback.ready(root, row["id"]) is not None
-            if publication.enabled():
-                row["publication"] = publication.info(row)
+            if batched:
+                row["publication"] = publication_info[row["id"]]
                 row["playback_ready"] = row["playback_ready"] and row["publication"]["released"]
         return {
             "items": items,
@@ -528,14 +529,14 @@ def create_app(
                 did = Settings.load(config_path).did
             except CameraError as error:
                 raise HTTPException(503, "Camera profile unavailable") from error
-        value = store.timeline(day, did)
-        for item in value["items"]:
-            item["playback_ready"] = (
-                item["original_ready"] and playback.ready(root, item["id"]) is not None
-            )
-        if publication.enabled():
-            value["items"] = [item for item in value["items"] if publication.published(store.get(item["id"]))]
+        value = store.timeline(day, did, include_rows=True)
+        rows = {row["id"]: row for row in value.pop("_rows")}
+        batched, info = publication.infos(rows.values())
+        if batched:
+            value["items"] = [item for item in value["items"] if info[item["id"]]["released"]]
             value["total"] = len(value["items"])
+        for item in value["items"]:
+            item["playback_ready"] = bool(item["original_ready"] and playback.ready(root, item["id"], item=rows[item["id"]]))
         value["catalog"] = store.catalog(did, day)
         return value
 
@@ -637,18 +638,20 @@ def create_app(
     def publication_status(day: date):
         groups = {}
         stopped = []
-        for item in store.list():
-            if not item["start_local"].startswith(day.isoformat()) or item["state"] == "evicted":
+        _, rows = store.library(day, 0, 10000)
+        enabled, infos = publication.infos(rows)
+        for item in rows:
+            if item["state"] == "evicted":
                 continue
-            info = publication.info(item)
-            ready = bool(playback.ready(root, item["id"]))
+            info = infos[item["id"]]
+            ready = bool(playback.ready(root, item["id"], item=item))
             group = groups.setdefault(info["batch_start"], {**{k: info[k] for k in ("batch_start", "batch_end", "release_at", "released")}, "known": 0, "ready": 0, "stopped": 0})
             group["known"] += 1
             group["ready"] += int(ready)
             if not ready and info["stopped_reason"]:
                 group["stopped"] += 1
                 stopped.append({"id": item["id"], "start_local": item["start_local"], "error": item["error"], **info})
-        return {"enabled": publication.enabled(), "batches": sorted(groups.values(), key=lambda g: g["batch_start"]), "stopped": stopped}
+        return {"enabled": enabled, "batches": sorted(groups.values(), key=lambda g: g["batch_start"]), "stopped": stopped}
 
     @app.post("/api/jobs/retry-once/{key}", status_code=202, dependencies=[Depends(authorize)])
     def publication_retry(key: str):

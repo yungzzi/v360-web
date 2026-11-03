@@ -127,7 +127,7 @@ class RecordingStore:
                 ),
             )
 
-    def timeline(self, day, did=None):
+    def timeline(self, day, did=None, *, include_rows=False):
         """Bounded device-local timeline; no camera or media processing is triggered."""
         total, rows = self.library(day, 0, 10000, did)
         clauses = ["substr(start_local,1,7)=?"]
@@ -158,7 +158,7 @@ class RecordingStore:
                     # Device-declared seconds are approximate, never a continuity guarantee.
                     "duration_hint": duration if 0 < duration <= 3600 else None,
                     "state": row["state"],
-                    "original_ready": self.media_path(row["id"]) is not None,
+                    "original_ready": self.media_path(row["id"], item=row) is not None,
                 }
             )
         return {
@@ -167,6 +167,7 @@ class RecordingStore:
             "items": items,
             "total": total,
             "truncated": total > len(items),
+            **({"_rows": rows} if include_rows else {}),
         }
 
     def catalog(self, did, day):
@@ -224,8 +225,8 @@ class RecordingStore:
             row = db.execute("SELECT until FROM media_leases WHERE id=?", (key,)).fetchone()
         return bool(row and row[0] > time.time())
 
-    def media_path(self, key: str):
-        item = self.get(key)
+    def media_path(self, key: str, *, item=None):
+        item = self.get(key) if item is None else item
         if not item or item["state"] != "verified" or not item["path"]:
             return None
         path = (self.root / item["path"]).resolve()

@@ -419,7 +419,7 @@ def test_server_prepares_saved_recordings_without_downloading_them(tmp_path, mon
     policy(tmp_path, mode="server")
     key, _ = record(tmp_path)
     prepared = []
-    monkeypatch.setattr(playback, "ready", lambda *args: None)
+    monkeypatch.setattr(playback, "ready", lambda *args, **kwargs: None)
     monkeypatch.setattr(playback, "prepare", lambda config, key: prepared.append(key))
     monkeypatch.setattr(
         service,
@@ -466,7 +466,7 @@ def test_server_preparation_failures_stop_at_work_window(tmp_path, monkeypatch):
     for i in range(15):
         record(tmp_path, i)
     calls = []
-    monkeypatch.setattr(playback, "ready", lambda *args: None)
+    monkeypatch.setattr(playback, "ready", lambda *args, **kwargs: None)
 
     clock = [0]
     monkeypatch.setattr("v360_web.backup.time.monotonic", lambda: clock[0])
