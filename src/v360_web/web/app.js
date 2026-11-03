@@ -45,7 +45,7 @@ async function poll(){
   try{const response=await appFetch('/api/status',{});if(response.status===401){showLogin();return;}if(!response.ok)return;const state=await response.json();renderLenses(state.lenses);$('viewers').textContent=state.live.viewers+' 人';renderBackup(state.backup);const b=state.battery||{};const pct=b.percent;const fill=$('battery-fill');fill.style.width=pct==null?'0%':Math.max(0,Math.min(100,pct))+'%';$('battery-percent').textContent=pct==null?'—':pct+'%';$('battery-badge').classList.toggle('low',pct!=null&&pct<=20);$('battery-badge').classList.toggle('stale',!!b.stale);$('battery-charge').hidden=b.charging!==true;const batteryLabel=pct==null?'尚未取得电量':'电量 '+pct+'%'+(b.updated_at?'，读取于 '+new Date(b.updated_at*1000).toLocaleString():'');$('battery-badge').setAttribute('aria-label',batteryLabel);$('battery-badge').title=batteryLabel;$('battery').textContent=b.percent==null?'未知':b.percent+'%';$('charging').textContent=b.charging==null?'未知':b.charging?'设备报告充电中':'未报告外接充电';$('battery-time').textContent=b.updated_at?new Date(b.updated_at*1000).toLocaleString()+(b.stale?' · 待读取更新':' · 最近读取'):'尚未读取电量';$('local-controls').hidden=!state.local_shutdown_available;}
   catch{/* Keep the active player's error reporting independent of status polling. */}
 }
-function showLogin(){clearHistoryCache();mediaSessionUntil=0;clearReplay();resetPlayer();signedIn=false;$('login').hidden=false;$('dashboard').hidden=true;$('logout').hidden=true;$('token').value='';}
+function showLogin(){if($('management-dialog').open)$('management-dialog').close();clearHistoryCache();mediaSessionUntil=0;clearReplay();resetPlayer();signedIn=false;$('login').hidden=false;$('dashboard').hidden=true;$('logout').hidden=true;$('token').value='';}
 function showDashboard(){serviceStopped=false;signedIn=true;$('token').value='';$('login').hidden=true;$('dashboard').hidden=false;$('logout').hidden=false;poll();}
 async function logout(){clearHistoryCache();mediaSessionUntil=0;
   resetPlayer();
@@ -120,7 +120,7 @@ const stateLabels={discovered:'尚未下载',downloading:'正在下载',download
 const stageLabels={connecting:'正在连接摄像头',downloading:'正在下载录像',validating:'正在检查录像',preparing_playback:'正在准备网页回放',validating_playback:'正在检查回放文件'};
 const jobErrors={download_rejected:'设备暂未提供这段录像文件，后台会保留缺口并继续核对。',local_media_invalid:'文件检查未通过，已安排重新获取。',backup_yielded:'后台工作已让位或到达本轮时间上限，下轮继续。',storage_limit:'空间预算已满，暂时不能新增文件。',disk_reserve:'需要给系统保留更多磁盘空间，任务已停止。',interrupted:'上次服务重启中断了任务，可以重新操作。',preview_timeout:'准备回放用时过长，原始录像仍保留。',preview_truncated:'回放文件检查未通过，原片仍保留。'};
 function libraryMessage(text){$('library-notice').textContent=text;}
-function clearReplay(){prefetchInfo=null;$('prefetch-status').textContent='';if(signedIn)appFetch('/api/playback/prefetch',{method:'DELETE',keepalive:true}).catch(()=>{});pendingTimelineSeek=null;replayGeneration++;replayKey=null;replayItem=null;$('replay-snapshot').disabled=true;$('timeline-cursor').hidden=true;$('replay-title').textContent='选择一个片段';$('replay-message').textContent='原片会保留在服务器，回放文件按需准备。';const v=$('replay-video');if(v){v.pause();v.removeAttribute('src');v.load();}}
+function clearReplay(){prefetchInfo=null;$('prefetch-status').textContent='';if(signedIn)appFetch('/api/playback/prefetch',{method:'DELETE',keepalive:true}).catch(()=>{});pendingTimelineSeek=null;replayGeneration++;replayKey=null;replayItem=null;$('replay-snapshot').disabled=true;$('timeline-cursor').hidden=true;$('replay-title').textContent='选择一个片段';$('replay-message').textContent='选择日期，再拖动蓝线。';const v=$('replay-video');if(v){v.pause();v.removeAttribute('src');v.load();}}
 function setTab(library){if(library)resetPlayer('已切换到历史录像。');else{clearReplay();if(!playing){status('已返回实时观看，可以开始连接摄像头。');$('player-message').textContent='点击「开始观看」连接摄像头';}}$('live-panel').hidden=library;$('library-panel').hidden=!library;$('tab-live').classList.toggle('selected',!library);$('tab-library').classList.toggle('selected',library);if(library){loadLibrary();recoverLibraryJob();}}
 $('tab-live').addEventListener('click',()=>setTab(false));$('tab-library').addEventListener('click',()=>setTab(true));
 const localToday=new Date();$('recording-day').value=[localToday.getFullYear(),String(localToday.getMonth()+1).padStart(2,'0'),String(localToday.getDate()).padStart(2,'0')].join('-');
@@ -188,9 +188,9 @@ async function loadTimeline(){
   if(!day)return;
   if(timelineData?.day!==day){timelineData=null;renderTimeline();$('recording-days').replaceChildren();$('timeline-message').textContent='正在读取当天目录…';}
   try{const value=await api('/api/library/timeline?day='+encodeURIComponent(day));if(generation!==timelineGeneration||day!==$('recording-day').value||!signedIn)return;
-    timelineData={...value,items:$('history-source').value==='ready'?value.items.filter(i=>i.playback_ready):value.items};$('timeline-title').textContent='录像时间轴 · '+($('history-source').value==='ready'?'可回放 '+timelineData.items.length+' / ':'')+'已发现 '+value.total;renderTimeline();const days=$('recording-days');days.replaceChildren();
+    timelineData={...value,items:$('history-source').value==='ready'?value.items.filter(i=>i.playback_ready):value.items};$('timeline-title').textContent='选择时间 · '+timelineData.items.length+' 段录像';renderTimeline();const days=$('recording-days');days.replaceChildren();
     for(const entry of value.days){const button=document.createElement('button');button.className='quiet'+(entry.day===day?' selected':'');button.textContent=entry.day.slice(5)+' · 已发现 '+entry.count;button.setAttribute('aria-label',entry.day+'，'+entry.count+' 段录像');button.addEventListener('click',()=>changeDay(entry.day));days.append(button);}
-    $('timeline-message').textContent=($('history-source').value==='ready'?'可直接回放 '+timelineData.items.length+' 段 / 当天已发现 '+value.total+' 段。':'当天已发现 '+value.total+' 段；未就绪的片段需要下载或处理。')+(value.truncated?' 标记数量过多，仅显示最近 10000 段。':'')+(value.catalog?.metadata_complete?'':' 目录尚未确认完整。');
+    $('timeline-message').textContent=timelineData.items.length?'拖动蓝线，松手后播放；空白处会跳到下一段。':'这一天暂时没有可看的录像，可以换个日期。';
   }catch(error){if(generation===timelineGeneration){timelineData=null;renderTimeline();$('timeline-message').textContent=error.message;}}
 }
 function renderTimeline(){
@@ -313,6 +313,8 @@ async function loadPublication(){
  if(day!==$('recording-day').value||!signedIn)return;
  batchPublicationEnabled=value.enabled;
  $('publication-panel').hidden=!value.enabled;
+ const upcoming=value.batches.find(batch=>!batch.released);
+ $('family-history-status').textContent=upcoming?'录像自动同步 · 下一批 '+upcoming.release_at.slice(11,16)+' 更新':'录像自动保存 · 选择日期即可回看';
  if(!value.enabled)return;
  const batches=$('publication-batches');batches.replaceChildren();
  for(const batch of value.batches){
@@ -338,3 +340,7 @@ $('retry-selected').addEventListener('click',async()=>{
 });
 
 setInterval(()=>{if(batchPublicationEnabled&&signedIn&&!serviceStopped&&!$('library-panel').hidden&&!libraryBusy)loadLibrary();},30000);
+
+$('open-management').addEventListener('click',()=>$('management-dialog').showModal());
+$('close-management').addEventListener('click',()=>$('management-dialog').close());
+$('today-recordings').addEventListener('click',()=>changeDay(new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai'}).format(new Date())));
