@@ -59,3 +59,5 @@ input,select{font-size:16px}
 .timeline-ticks,.timeline-track{margin-left:14px;margin-right:14px}
 .timeline #timeline-seek::-webkit-slider-thumb{background:radial-gradient(circle at 14px 8px,#2179d1 0 6px,transparent 6px),linear-gradient(90deg,transparent 12px,#2179d1 12px,#2179d1 15px,transparent 15px)}
 .timeline #timeline-seek::-moz-range-thumb{background:radial-gradient(circle at 14px 8px,#2179d1 0 6px,transparent 6px),linear-gradient(90deg,transparent 12px,#2179d1 12px,#2179d1 15px,transparent 15px)}
+
+#publication-stopped input[type="checkbox"]{width:1.2rem;height:1.2rem;flex:0 0 auto;}

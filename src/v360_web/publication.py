@@ -17,6 +17,14 @@ def window(item):
     return start, start + timedelta(minutes=30), start + timedelta(hours=1)
 
 
+def final_check_window(now=None):
+    now = now or now_local()
+    if now.minute % 30 < 25:
+        return None
+    release = now.replace(minute=now.minute // 30 * 30, second=0, microsecond=0) + timedelta(minutes=30)
+    return release - timedelta(hours=1), release - timedelta(minutes=30), release
+
+
 class Publication(RecordingStore):
     def __init__(self, root):
         super().__init__(root)

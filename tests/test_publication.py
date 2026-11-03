@@ -75,3 +75,10 @@ def test_fifth_successful_transfer_can_still_prepare_before_release(tmp_path, mo
     store.update(row["id"], "downloaded_unverified")
     assert store.allowed(store.get(row["id"]))
     assert not store.begin(row["id"])
+
+
+def test_final_directory_check_has_one_five_minute_window_per_release():
+    assert publication.final_check_window(datetime(2026, 11, 3, 12, 54)) is None
+    start, end, release = publication.final_check_window(datetime(2026, 11, 3, 12, 55))
+    assert (start.hour, start.minute, end.hour, end.minute, release.hour, release.minute) == (12, 0, 12, 30, 13, 0)
+    assert publication.final_check_window(datetime(2026, 11, 3, 13)) is None

@@ -14,7 +14,7 @@ from .diagnostics import record
 from .errors import CameraError
 from .jobs import JobStore
 from .maintenance import cleanup
-from .publication import Publication, window
+from .publication import Publication, final_check_window, window
 
 TRANSIENT_ERRORS = {"sdk_connect", "sdk_read", "sdk_write", "read_timeout"}
 
@@ -525,6 +525,23 @@ class BackupManager:
                     else self.state.get("queried_records", 0),
                     catalog_error=None,
                 )
+
+            final_window = final_check_window() if self.publication.enabled() else None
+            if final_window and not local_only:
+                batch_start, batch_end, release = final_window
+                check_key = "publication_final_check:" + settings.did + ":" + release.isoformat()
+                if not self.db.read(check_key, False):
+                    try:
+                        # Queries use recording start times, while grouping uses end times.
+                        # Include possible cross-boundary clips (supported max 1 hour).
+                        service.discover(self.config, 0, batch_start - timedelta(hours=1), batch_end - timedelta(seconds=1))
+                    except CameraError as error:
+                        if error.code not in TRANSIENT_ERRORS:
+                            raise
+                        self.update(catalog_error=error.code)
+                        next_run = min(next_run, time.time() + 60)
+                    else:
+                        self.db.write(check_key, True)
 
             def candidates():
                 rows = [
