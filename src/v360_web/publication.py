@@ -42,9 +42,20 @@ class Publication(RecordingStore):
             db.execute("INSERT OR REPLACE INTO publication_settings VALUES (1,?)", (bool(value),))
 
     def info(self, item, now=None):
-        start, end, release = window(item)
         with self.connection() as db:
             row = db.execute("SELECT * FROM publication_attempts WHERE id=?", (item["id"],)).fetchone()
+        return self.describe(item, row, now)
+
+    def infos(self, items):
+        with self.connection() as db:
+            flag = db.execute("SELECT enabled FROM publication_settings WHERE id=1").fetchone()
+            attempts = {r["id"]: r for r in db.execute("SELECT * FROM publication_attempts")}
+        now = now_local()
+        return bool(flag and flag[0]), {item["id"]: self.describe(item, attempts.get(item["id"]), now) for item in items}
+
+    @staticmethod
+    def describe(item, row=None, now=None):
+        start, end, release = window(item)
         attempts = row["attempts"] if row else 0
         expired = (now or now_local()) >= release
         return {"batch_start": start.isoformat(), "batch_end": end.isoformat(), "release_at": release.isoformat(),

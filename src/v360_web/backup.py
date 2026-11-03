@@ -94,14 +94,16 @@ class BackupManager:
         floor = self.db.read("recovery_floor:" + did)
         if floor is None:
             return False
+        all_rows = self.db.list()
+        batched, infos = self.publication.infos(all_rows)
         rows = [
             r
-            for r in self.db.list()
+            for r in all_rows
             if r["device_id"] == did
             and r["state"] in ("verified", "downloaded_unverified")
-            and self.publication.allowed(r)
+            and (not batched or infos[r["id"]]["stopped_reason"] is None)
             and r["start_local"] >= floor
-            and not playback.ready(self.root, r["id"])
+            and not playback.ready(self.root, r["id"], item=r)
             and self.retry_ready("prepare:" + r["id"], time.time())
         ]
         recent = (
@@ -259,7 +261,7 @@ class BackupManager:
             ).fetchall()
         waiting = [r for r in pending_rows if r["id"] not in self.ready_ids]
         # Use the declared clip end: an ongoing clip is not overdue.
-        batched = self.publication.enabled()
+        batched, infos = self.publication.infos(waiting)
         overdue = sum(
             window(r)[2] <= now_local if batched else
             datetime.fromisoformat(r["start_local"])
@@ -267,7 +269,7 @@ class BackupManager:
             < now_local - timedelta(minutes=30)
             for r in waiting
         )
-        stopped = sum(bool(self.publication.info(r)["stopped_reason"]) for r in waiting) if batched else 0
+        stopped = sum(bool(infos[r["id"]]["stopped_reason"]) for r in waiting) if batched else 0
         stages = {
             "awaiting_download": sum(
                 r["state"] not in ("verified", "downloaded_unverified") for r in waiting
@@ -282,7 +284,7 @@ class BackupManager:
             "recent_pending": len(waiting) - overdue,
             **({"stopped_auto": stopped, "batch_publication": True} if batched else {}),
             "overdue_pending": overdue,
-            "retry_pending": sum(bool(r["error"]) and (not batched or self.publication.allowed(r)) for r in waiting),
+            "retry_pending": sum(bool(r["error"]) and (not batched or infos[r["id"]]["stopped_reason"] is None) for r in waiting),
             **self.ready_summary,
             "awaiting_playback": max(0, in_scope[0] - self.recent_ready_count),
             "pending_in_scope": in_scope[1],
@@ -544,13 +546,15 @@ class BackupManager:
                         self.db.write(check_key, True)
 
             def candidates():
+                all_rows = self.db.list()
+                batched, infos = self.publication.infos(all_rows)
                 rows = [
                     row
-                    for row in self.db.list()
+                    for row in all_rows
                     if row["device_id"] == settings.did
                     and row["channel"] == 0
                     and row["state"] != "evicted"
-                    and self.publication.allowed(row)
+                    and (not batched or infos[row["id"]]["stopped_reason"] is None)
                     and not (
                         self.prepare_thread is not None
                         and row["state"] in ("verified", "downloaded_unverified")
@@ -558,7 +562,7 @@ class BackupManager:
                     and (not local_only or row["state"] in ("verified", "downloaded_unverified"))
                     and (
                         row["state"] != "verified"
-                        or (policy["mode"] == "server" and not playback.ready(self.root, row["id"]))
+                        or (policy["mode"] == "server" and not playback.ready(self.root, row["id"], item=row))
                     )
                     and row["start_local"]
                     >= (

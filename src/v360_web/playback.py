@@ -31,11 +31,14 @@ def paths(root, key, start=None):
     return targets
 
 
-def ready(root: Path, key: str, start=None):
+def ready(root: Path, key: str, start=None, *, item=None):
     try:
         target, manifest, _ = paths(root, key, start)
-        item = RecordingStore(root).get(key)
-        if not item or not RecordingStore(root).media_path(key):
+        item = RecordingStore(root).get(key) if item is None else item
+        if not item or item["state"] != "verified" or not item.get("path"):
+            return None
+        source = (root / item["path"]).resolve()
+        if not source.is_relative_to(root.resolve()) or not source.is_file():
             return None
         info = read_private_json(manifest)
         if (
