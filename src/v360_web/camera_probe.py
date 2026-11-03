@@ -320,3 +320,48 @@ def playback_probe(config, key, stream_type=None, capture=False, test_download=F
             except CameraError:
                 result["stop_requested"] = False
     return result
+
+
+def download_probe(config, key, stop_first=False):
+    """Compare APK lifecycle on an actual file, without promoting diagnostic bytes."""
+    settings = Settings.load(config)
+    item = RecordingStore(settings.data_root).get(key)
+    if not item or item["device_id"] != settings.did:
+        raise CameraError("recording_missing", "Recording is not indexed for this device.")
+    folder = settings.data_root / "protocol-diagnostics"
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Stable owned name; camera-job lock serializes probes. Never overwrite an original.
+    target = folder / "download-lifecycle.part"
+    if target.is_symlink():
+        raise CameraError("probe_path", "Diagnostic path must not be a symlink.")
+    result = {"stop_first": stop_first, "transferred": False}
+    settings.transfer_timeout = min(settings.transfer_timeout, 30)
+
+    def bounded(written, total):
+        if total > 16 * 1024**2:
+            raise CameraError("probe_size", "Diagnostic transfer exceeds 16 MiB.")
+        from .storage import check_free
+        check_free(settings.data_root, max(0, total - written))
+
+    try:
+        with CameraClient(settings) as camera:
+            try:
+                if stop_first:
+                    result["initial_stop_result"] = camera.stop_download(item["channel"])
+                    if result["initial_stop_result"] != 0:
+                        raise CameraError("download_stop_rejected", "Device did not accept stop.")
+                transfer = camera.download(
+                    item["channel"], datetime.fromisoformat(item["start_local"]),
+                    target, item["weekday"], progress=bounded,
+                )
+                result.update(transferred=True, bytes=transfer["bytes"], sha256=transfer["sha256"])
+            except CameraError as error:
+                result.update(error=error.code, sdk_code=error.sdk_code)
+            finally:
+                try:
+                    result["final_stop_result"] = camera.stop_download(item["channel"])
+                except CameraError as error:
+                    result["stop_error"] = error.code
+        return result
+    finally:
+        target.unlink(missing_ok=True)

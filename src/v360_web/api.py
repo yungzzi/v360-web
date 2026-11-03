@@ -624,6 +624,10 @@ def create_app(
     ):
         return submit(camera_probe.playback_probe, key, stream_type, capture, test_download)
 
+    @app.post("/api/jobs/download-probe/{key}", status_code=202, dependencies=[Depends(authorize)])
+    def download_probe_job(key: str, stop_first: bool = False):
+        return submit(camera_probe.download_probe, key, stop_first)
+
     @app.post("/api/jobs/download/{key}", status_code=202, dependencies=[Depends(authorize)])
     def download_job(key: str):
         return submit(service.download, key)

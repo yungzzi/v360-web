@@ -193,6 +193,14 @@ class CameraClient:
                 return events
         raise CameraError("list_unfinished", "Recording list did not receive an end marker.")
 
+    def stop_download(self, channel):
+        """APK stop-download handshake; never deletes a remote recording."""
+        self.send(33070, struct.pack("<I", channel))
+        reply = self.response(33071, time.monotonic() + self.settings.request_timeout)
+        if len(reply) < 4:
+            raise CameraError("download_stop_response", "Stop reply is truncated.")
+        return struct.unpack_from("<i", reply)[0]
+
     def download(
         self, channel: int, start: datetime, target: Path, weekday: int = 0, progress=None
     ):

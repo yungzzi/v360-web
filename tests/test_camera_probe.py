@@ -199,3 +199,44 @@ def test_unsupported_record_settings_are_not_presented_as_a_real_mode(tmp_path):
     result = camera_probe.read_device_health(peer, tmp_path)
     assert result["record_config_error"] == "record_config_response"
     assert "record_type_raw" not in result
+
+
+@pytest.mark.parametrize("reject", [False, True])
+def test_download_probe_uses_real_transfer_even_for_verified_item_and_never_promotes(monkeypatch, tmp_path, reject):
+    from v360_web.client import CameraClient
+
+    peer = Peer(struct.pack("<i", 0))
+    peer.stop_download = lambda channel: CameraClient.stop_download(peer, channel)
+    settings = SimpleNamespace(did="test", data_root=tmp_path, transfer_timeout=120)
+    monkeypatch.setattr(camera_probe.Settings, "load", lambda _: settings)
+    monkeypatch.setattr(camera_probe, "CameraClient", lambda _: peer)
+    item = {"device_id": "test", "state": "verified", "channel": 2,
+            "start_local": "2026-11-03T12:00:00", "weekday": 2}
+    monkeypatch.setattr(camera_probe, "RecordingStore", lambda _: SimpleNamespace(get=lambda _: item))
+    calls = []
+
+    def transfer(channel, start, target, weekday, progress):
+        calls.append((channel, weekday))
+        target.write_bytes(b"partial")
+        if reject:
+            raise CameraError("download_rejected", "Synthetic negative response", -1)
+        return {"bytes": 7, "sha256": "synthetic"}
+
+    peer.download = transfer
+    result = camera_probe.download_probe(None, "key", stop_first=True)
+    assert calls == [(2, 2)]
+    assert peer.sent == [(33070, struct.pack("<I", 2))] * 2
+    assert result["transferred"] is not reject
+    if reject:
+        assert result["error"] == "download_rejected" and result["sdk_code"] == -1
+    assert not (tmp_path / "protocol-diagnostics/download-lifecycle.part").exists()
+    assert item["state"] == "verified"
+
+
+def test_download_stop_truncated_ack_is_not_success():
+    from v360_web.client import CameraClient
+
+    peer = Peer(b"x")
+    with pytest.raises(CameraError) as error:
+        CameraClient.stop_download(peer, 0)
+    assert error.value.code == "download_stop_response"
