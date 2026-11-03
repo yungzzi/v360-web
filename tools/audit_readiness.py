@@ -15,7 +15,7 @@ def snapshot(home, verified_http=None):
     root = home / "data"
     verified_http = verified_http if verified_http is not None else set()
     now = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
-    with sqlite3.connect(f"file:{root / 'recordings.sqlite3'}?mode=ro", uri=True) as db:
+    with sqlite3.connect(f"file:{root / 'recordings.sqlite3'}?mode=ro", uri=True, timeout=5) as db:
         db.row_factory = sqlite3.Row
         policy = db.execute(
             "SELECT body FROM backup_state WHERE id LIKE 'recovery_floor:%' LIMIT 1"
@@ -109,6 +109,21 @@ def snapshot(home, verified_http=None):
     }
 
 
+def observe(home, cache):
+    try:
+        return snapshot(home, cache)
+    except (sqlite3.Error, OSError, ValueError) as error:
+        # An interrupted observation is not evidence of a complete archive.
+        return {
+            "at": datetime.now(UTC).isoformat(),
+            "acceptance": "observation_failed",
+            "observation_error": (
+                "database_unavailable" if isinstance(error, sqlite3.Error)
+                else "observation_unavailable"
+            ),
+        }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--home", type=Path, required=True)
@@ -120,7 +135,7 @@ def main():
     cache = set()
     until = time.monotonic() + max(0, args.watch_hours) * 3600
     while True:
-        report = snapshot(home, cache)
+        report = observe(home, cache)
         temporary = output / "latest.new"
         temporary.write_text(json.dumps(report, indent=2) + "\n")
         temporary.chmod(0o600)

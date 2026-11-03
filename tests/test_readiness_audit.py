@@ -70,3 +70,20 @@ def test_readiness_audit_checks_source_and_http_not_just_saved_state(tmp_path, m
     assert result["overdue_missing"] == 1 and result["http_verified"] == 1
     assert len(requests) == 1 and keys[0] in requests[0]
     assert (root / "recordings.sqlite3").stat().st_mtime_ns == before
+
+
+def test_observer_records_database_interruption_and_can_resume(tmp_path, monkeypatch):
+    import sqlite3
+
+    observe = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/audit_readiness.py"))["observe"]
+    def busy(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setitem(observe.__globals__, "snapshot", busy)
+    result = observe(tmp_path, set())
+    assert result["acceptance"] == "observation_failed"
+    assert result["observation_error"] == "database_unavailable"
+    assert "full_ready" not in result and "overdue_missing" not in result
+    recovered = {"acceptance": "pending_evidence_review", "overdue_missing": 2}
+    monkeypatch.setitem(observe.__globals__, "snapshot", lambda *args: recovered)
+    assert observe(tmp_path, set()) == recovered
