@@ -663,3 +663,81 @@ def test_all_playback_callers_share_one_encoder():
         a.join(2)
         b.join(2)
     assert second.is_set()
+
+
+def test_prefetch_add_and_remove_cannot_overwrite_each_other(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    old, _ = record(tmp_path, 10)
+    new, _ = record(tmp_path)
+    backup.db.write("download_ahead", [old])
+    entered, release, removed = threading.Event(), threading.Event(), threading.Event()
+    original = backup.db.write
+
+    def delayed_write(key, value):
+        if key == "download_ahead" and new in value:
+            entered.set()
+            assert release.wait(3)
+        original(key, value)
+
+    monkeypatch.setattr(backup.db, "write", delayed_write)
+    add = threading.Thread(target=lambda: backup.prefetch(add=new))
+
+    def remove():
+        backup.prefetch(remove=old)
+        removed.set()
+
+    delete = threading.Thread(target=remove)
+    add.start()
+    assert entered.wait(2)
+    delete.start()
+    try:
+        assert not removed.wait(0.05)
+    finally:
+        release.set()
+        add.join(3)
+        delete.join(3)
+    assert not add.is_alive() and not delete.is_alive()
+    assert backup.db.read("download_ahead") == [new]
+
+
+def test_preparation_deadline_precedes_prefetch_priority(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    earlier, _ = record(tmp_path, 10)
+    later, _ = record(tmp_path, 0)
+    backup.db.write("recovery_floor:test-device", "2020-01-01T00:00:00")
+    backup.db.write("download_ahead", [later])
+    selected = []
+    monkeypatch.setattr("v360_web.backup.playback.prepare", lambda _, key: selected.append(key))
+    assert backup.prepare_one()
+    assert selected == [earlier]
+
+
+def test_zero_duration_source_is_refetched_instead_of_reencoded(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    policy(tmp_path, mode="server")
+    key, path = record(tmp_path)
+    backup.db.write("recovery_floor:test-device", "2020-01-01T00:00:00")
+    backup.db.write("download_ahead", [key])
+
+    def incomplete(*args):
+        raise CameraError("preview_duration", "zero duration")
+
+    monkeypatch.setattr("v360_web.backup.playback.prepare", incomplete)
+    assert backup.prepare_one()
+    row = backup.db.get(key)
+    assert row["state"] == "failed" and row["error"] == "local_media_invalid"
+    assert path.exists()  # Preserve source evidence until a successful fresh transfer.
+    assert backup.db.read("download_ahead") == []
+    with backup.db.connection() as db:
+        retry = db.execute("SELECT next_try FROM backup_retries WHERE id=?", (key,)).fetchone()
+    assert 50 < retry[0] - time.time() <= 60
+
+
+def test_recent_rejection_retries_before_deadline_but_history_is_bounded(tmp_path, monkeypatch):
+    backup = manager(tmp_path, monkeypatch)
+    recent, _ = record(tmp_path, 0, state="discovered")
+    old, _ = record(tmp_path, 24 * 60, state="discovered")
+    now = time.time()
+    assert backup.failed(recent, now, "download_rejected") == now + 60
+    assert backup.failed(old, now, "download_rejected") == now + 3600

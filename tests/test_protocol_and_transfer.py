@@ -93,6 +93,17 @@ def test_invalid_record_dates_require_opt_in_and_preserve_raw_page(bridge_server
             "invalid_records": 1,
             "metadata_complete": False,
             "raw_pages_saved": 1,
+            "pages": [
+                {
+                    "declared_total": 2,
+                    "declared_count": 2,
+                    "index": 0,
+                    "finished": True,
+                    "payload_bytes": 52,
+                    "valid_records": 1,
+                    "invalid_records": 1,
+                }
+            ],
         }
         raw_files = list((tmp_path / "protocol-diagnostics").glob("*.bin"))
         assert len(raw_files) == 1

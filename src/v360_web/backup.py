@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from . import playback, progress, service, storage
 from .backup_policy import DEFAULT, BackupPolicy
 from .config import Settings
+from .diagnostics import record
 from .errors import CameraError
 from .jobs import JobStore
 from .maintenance import cleanup
@@ -64,6 +65,21 @@ class BackupManager:
             self.thread = threading.Thread(target=self.run, name="v360-backup", daemon=True)
             self.thread.start()
 
+    def prefetch(self, *, add=None, remove=None):
+        """Atomically change the persistent single-producer/consumer queue."""
+        with self.guard:
+            ahead = [
+                key
+                for key in self.db.read("download_ahead", [])
+                if key != remove
+                and not playback.ready(self.root, key)
+                and (self.db.get(key) or {}).get("state") != "evicted"
+            ]
+            if add is not None and add not in ahead and not playback.ready(self.root, add):
+                ahead.append(add)
+            self.db.write("download_ahead", ahead)
+            return ahead
+
     def prepare_one(self):
         if (
             not self.config
@@ -92,9 +108,9 @@ class BackupManager:
         rows.sort(
             key=lambda r: (
                 r["start_local"] < recent,
-                r["id"] not in ahead,
                 datetime.fromisoformat(r["start_local"])
                 + timedelta(seconds=max(0, min(r["duration_raw"], 3600))),
+                r["id"] not in ahead,
             )
         )
         if not rows:
@@ -114,10 +130,16 @@ class BackupManager:
             self.update(prepare_state="waiting", last_prepare_error=None)
         except CameraError as error:
             if error.code not in ("backup_yielded", "interrupted"):
-                self.failed("prepare:" + key, time.time(), error.code)
-                self.db.write(
-                    "download_ahead", [k for k in self.db.read("download_ahead", []) if k != key]
-                )
+                if error.code in ("preview_duration", "media_incomplete"):
+                    # A one-frame/zero-duration source passes a decode-only check.
+                    # Re-fetch its source instead of retrying the same conversion forever.
+                    self.db.update(key, "failed", error="local_media_invalid")
+                    retry_at = self.failed(key, time.time(), "local_media_invalid")
+                    self.update(next_run=min(self.state.get("next_run", retry_at), retry_at))
+                    self.wake.set()
+                else:
+                    self.failed("prepare:" + key, time.time(), error.code)
+                self.prefetch(remove=key)
             self.update(prepare_state="waiting", last_prepare_error=error.code)
         finally:
             progress.cancel_event.reset(token)
@@ -313,13 +335,38 @@ class BackupManager:
         return not row or row[0] <= now
 
     def failed(self, key, now, code=None):
+        recent_rejection = False
+        if code == "download_rejected":
+            item = self.db.get(key)
+            if item:
+                end = datetime.fromisoformat(item["start_local"]) + timedelta(
+                    seconds=max(0, min(item["duration_raw"], 3600))
+                )
+                recent_rejection = (
+                    now < end.replace(tzinfo=ZoneInfo("Asia/Hong_Kong")).timestamp() + 1800
+                )
         with self.db.connection() as db:
             row = db.execute("SELECT attempts FROM backup_retries WHERE id=?", (key,)).fetchone()
             attempts = (row[0] if row else 0) + 1
-            delay = 60 if code in TRANSIENT_ERRORS else (3600 if attempts < 3 else 86400)
+            delay = (
+                60
+                if recent_rejection
+                or code in TRANSIENT_ERRORS | {"local_media_invalid", "media_incomplete"}
+                else (3600 if attempts < 3 else 86400)
+            )
             db.execute(
                 "INSERT OR REPLACE INTO backup_retries VALUES (?,?,?)", (key, attempts, now + delay)
             )
+
+        record(
+            self.root,
+            "prepare_failed" if key.startswith("prepare:") else "download_failed",
+            key=key.removeprefix("prepare:"),
+            attempt=attempts,
+            error=code,
+            ok=False,
+        )
+        return now + delay
 
     def cycle(self):
         if not self.config or not self.db.policy()["enabled"]:
@@ -340,6 +387,15 @@ class BackupManager:
                     (time.time(),),
                 )
             self.db.write("transport_retry_migration_v2", True)
+        if not self.db.read("source_recheck_migration_v1", False):
+            # Previously a zero-duration source could be decoded and called verified.
+            # Let the local worker reconsider parked preparation failures once.
+            with self.db.connection() as db:
+                db.execute(
+                    "UPDATE backup_retries SET next_try=min(next_try,?) WHERE id LIKE 'prepare:%'",
+                    (time.time(),),
+                )
+            self.db.write("source_recheck_migration_v1", True)
         cancellation = progress.cancel_event.set(self.cancel)
         hook = None
         cycle_started = time.monotonic()
@@ -535,13 +591,7 @@ class BackupManager:
                 if self.prepare_thread is not None:
                     # Persistent bounded prefetch; readiness, not an in-memory notification,
                     # releases a slot after restart or a completed conversion.
-                    ahead = [
-                        key
-                        for key in self.db.read("download_ahead", [])
-                        if not playback.ready(self.root, key)
-                        and (self.db.get(key) or {}).get("state") != "evicted"
-                    ]
-                    self.db.write("download_ahead", ahead)
+                    ahead = self.prefetch()
                     if len(ahead) >= 3:
                         next_run = time.time() + 10
                         break
@@ -575,11 +625,7 @@ class BackupManager:
                             if not result or not result.get("rechecked_local_file"):
                                 downloaded += 1
                         if self.prepare_thread is not None:
-                            ahead = self.db.read("download_ahead", [])
-                            with self.guard:
-                                ahead = self.db.read("download_ahead", [])
-                                if row["id"] not in ahead:
-                                    self.db.write("download_ahead", ahead + [row["id"]])
+                            self.prefetch(add=row["id"])
                     if policy["mode"] == "server" and self.prepare_thread is None:
                         progress.check_cancelled()
                         playback.prepare(self.config, row["id"])
@@ -596,7 +642,7 @@ class BackupManager:
                         "storage_limit",
                     ):
                         raise
-                    self.failed(
+                    retry_at = self.failed(
                         (
                             "prepare:"
                             if (self.db.get(row["id"]) or {}).get("state") == "verified"
@@ -606,6 +652,7 @@ class BackupManager:
                         time.time(),
                         error.code,
                     )
+                    next_run = min(next_run, retry_at)
                     self.update(last_file_error=error.code, last_file_sdk_code=error.sdk_code)
                     if error.code in TRANSIENT_ERRORS:
                         # One device-wide recovery opportunity, not one retry per file.

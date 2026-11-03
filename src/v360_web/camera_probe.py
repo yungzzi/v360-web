@@ -72,6 +72,23 @@ def playback_probe(config, key, stream_type=None, capture=False):
     result = {}
     phase = "control_response"
     with CameraClient(settings) as camera:
+        # Stop and acknowledge any prior playback before creating this reader.
+        # ForceClose alone must not stand in for a confirmed device stop.
+        initial_stop = bytearray(payload)
+        struct.pack_into("<I", initial_stop, 4, 1)
+        camera.send(794, initial_stop)
+        stopped = camera.response(795, time.monotonic() + settings.request_timeout)
+        result["initial_stop_confirmed"] = (
+            len(stopped) >= 8 and struct.unpack_from("<i", stopped)[0] == 1
+        )
+        for _ in range(16):
+            drained = camera.bridge.rpc(
+                "read", session=camera.session, channel=3, size=16384, timeout_ms=50
+            )
+            if drained["ret"] not in (0, -3):
+                break
+            if not base64.b64decode(drained.get("data", ""), validate=True):
+                break
         frame = bytearray()
         frame_channel = []
         done = threading.Event()
@@ -137,6 +154,16 @@ def playback_probe(config, key, stream_type=None, capture=False):
                     frame_pts=pts,
                     frame_type=kind,
                 )
+                expected_start = int(
+                    datetime.fromisoformat(item["start_local"])
+                    .replace(tzinfo=ZoneInfo("Asia/Hong_Kong"))
+                    .timestamp()
+                )
+                result["frame_time_in_requested_range"] = (
+                    expected_start - 3
+                    <= pts
+                    <= expected_start + max(0, min(item["duration_raw"], 3600)) + 3
+                )
                 if capture and 0 < size <= 2 * 1024**2:
                     if kind == 16384:
                         ext = camera.bridge.read_exact(
@@ -192,6 +219,10 @@ def playback_probe(config, key, stream_type=None, capture=False):
             try:
                 camera.send(794, stop)
                 result["stop_requested"] = True
+                stopped = camera.response(795, time.monotonic() + min(5, settings.request_timeout))
+                result["stop_confirmed"] = (
+                    len(stopped) >= 8 and struct.unpack_from("<i", stopped)[0] == 1
+                )
             except CameraError:
                 result["stop_requested"] = False
     return result

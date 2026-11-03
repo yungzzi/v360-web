@@ -145,6 +145,7 @@ class CameraClient:
         deadline = time.monotonic() + self.settings.request_timeout
         events, seen = [], set()
         self.last_list_diagnostics = {"invalid_records": 0, "metadata_complete": True}
+        self.last_list_diagnostics["pages"] = []
         for _ in range(1024):
             payload = self.response(wire.LIST_RESPONSE, deadline)
             invalid = [] if self.settings.allow_invalid_record_dates else None
@@ -158,6 +159,17 @@ class CameraClient:
             identity = hashlib.sha256(payload).digest()
             if identity not in seen:
                 seen.add(identity)
+                self.last_list_diagnostics["pages"].append(
+                    {
+                        "declared_total": _total,
+                        "declared_count": struct.unpack_from("<i", payload, 8)[0],
+                        "index": _index,
+                        "finished": finished,
+                        "payload_bytes": len(payload),
+                        "valid_records": len(page),
+                        "invalid_records": len(invalid or []),
+                    }
+                )
                 events.extend(page)
                 if invalid:
                     self.last_list_diagnostics["invalid_records"] += len(invalid)

@@ -9,7 +9,7 @@ from .config import Settings
 from .diagnostics import record
 from .errors import CameraError
 from .maintenance import cleanup
-from .media import probe, validate_decode
+from .media import probe, validate_decode, validate_recording
 from .progress import report
 from .storage import admit, check_free
 from .store import RecordingStore
@@ -66,7 +66,7 @@ def download(config_path: Path, key: str, *, local_only=False, camera=None, defe
             if digest.hexdigest() == item["sha256"]:
                 report("validating")
                 try:
-                    probe(local)
+                    validate_recording(probe(local))
                     validate_decode(local)
                 except CameraError:
                     store.update(key, "failed", error="local_media_invalid")
@@ -103,6 +103,8 @@ def download(config_path: Path, key: str, *, local_only=False, camera=None, defe
             last_report = now
 
     report("connecting")
+    if item.get("sha256"):
+        record(store.root, "refetch_started", key=key, source_sha256=item["sha256"])
     store.update(key, "downloading", error=None)
     try:
         with nullcontext(camera) if camera is not None else CameraClient(settings) as peer:
@@ -126,6 +128,7 @@ def download(config_path: Path, key: str, *, local_only=False, camera=None, defe
         if defer_validation:
             return {"id": key, "state": "downloaded_unverified", **result}
         info = probe(destination)
+        validate_recording(info)
         report("validating")
         validate_decode(destination)
         store.update(key, "verified", error=None)

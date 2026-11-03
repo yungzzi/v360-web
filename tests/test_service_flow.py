@@ -115,3 +115,17 @@ def test_invalid_local_original_returns_to_network_queue(bridge_server, tmp_path
         assert store.get(key)["state"] == "failed"
         assert service.download(path, key)["state"] == "verified"
         assert state["connect_calls"] == before + 1
+
+
+@pytest.mark.parametrize("duration", ["0.000000", "nan", None, "invalid", "-1"])
+def test_zero_duration_original_cannot_pass_recording_validation(duration):
+    from v360_web.media import validate_recording
+
+    with pytest.raises(CameraError) as error:
+        validate_recording(
+            {
+                "format": {"duration": duration},
+                "streams": [{"codec_type": "video", "nb_frames": "1"}],
+            }
+        )
+    assert error.value.code == "media_incomplete"
