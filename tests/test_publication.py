@@ -64,3 +64,14 @@ def test_all_recording_media_routes_reject_unpublished_batches(tmp_path, monkeyp
         assert client.get('/api/publication?day=2026-11-03').status_code == 401
         report = client.get('/api/publication?day=2026-11-03', headers={"Authorization": "Bearer "+TOKEN}).json()
         assert report['batches'][0]['release_at'] == '2026-11-03T13:00:00'
+
+
+def test_fifth_successful_transfer_can_still_prepare_before_release(tmp_path, monkeypatch):
+    monkeypatch.setattr(publication, "now_local", lambda: datetime(2026, 11, 3, 12, 40))
+    store = publication.Publication(tmp_path);store.enable(True)
+    row = item(store, "2026-11-03T12:10:00")
+    for _ in range(5):
+        assert store.begin(row["id"])
+    store.update(row["id"], "downloaded_unverified")
+    assert store.allowed(store.get(row["id"]))
+    assert not store.begin(row["id"])

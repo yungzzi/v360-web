@@ -41,7 +41,7 @@ class Publication(RecordingStore):
         expired = (now or now_local()) >= release
         return {"batch_start": start.isoformat(), "batch_end": end.isoformat(), "release_at": release.isoformat(),
                 "released": expired, "attempts": attempts, "manual_attempts": row["manual_attempts"] if row else 0,
-                "stopped_reason": (row["reason"] if row else None) or ("attempt_limit" if attempts >= 5 else "window_closed" if expired else None)}
+                "stopped_reason": (row["reason"] if row else None) or ("attempt_limit" if attempts >= 5 and item["state"] not in ("verified", "downloaded_unverified") else "window_closed" if expired else None)}
 
     def allowed(self, item):
         return bool(item) and (not self.enabled() or self.info(item)["stopped_reason"] is None)
