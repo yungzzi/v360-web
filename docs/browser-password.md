@@ -35,3 +35,23 @@ web.json到私有升级快照。建议另存密码管理器，不提交Git或公
 
 兼容修复.43（a5c82b3）已部署，快照20261104T011931.125578Z。只核对
 令牌配置存在、权限600、39份备份包含web.json，未输出令牌内容。
+
+## 移动端普通输入法兼容（替代上一个切换方案）
+
+部分手机对曾为密码框的元素保留安全键盘标记，事后type切换仍不能输入
+中文。.44从HTML初始即为普通text，autocomplete关闭，整个生命周期不
+再设置password类型；用-webkit-text-security遮盖字符。默认可输入中文，
+只保留小眼睛控制遮盖，不要求先开中文模式。普通输入法可能学习输入
+内容，建议使用本站专用口令。后端HTTPS、密码派生、会话及频率限制不变。
+遮盖属于非标准浏览器功能，不支持时明确提示内容可见，不假装已隐藏。
+
+参考：https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/-webkit-text-security
+Chromium输入识别源码：
+https://raw.githubusercontent.com/chromium/chromium/main/third_party/blink/renderer/core/editing/ime/input_method_controller.cc
+
+新增检查覆盖初始text/关闭自动填充、切换只改变遮盖、恢复遮盖、内容及光标
+保留、不支持遮盖时的可见提示；中文JSON提交及原交互检查通过。未在用户
+的实体手机上测试，不能据模拟检查宣称所有厂商安全键盘均已兼容。
+
+.44（4d6c2e5）已部署，快照20261104T013445.546946Z，自动保存和批次发布
+恢复启用。未更改用户密码。

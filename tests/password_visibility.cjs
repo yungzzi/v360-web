@@ -12,3 +12,7 @@ test('login and change fields are never initially native password fields',()=>{
  const html=fs.readFileSync(path.resolve(__dirname,'../src/v360_web/web/index.html'),'utf8');
  for(const id of ['token','current-password','new-password','confirm-password']){const tag=html.match(new RegExp('<input id="'+id+'"[^>]*>'))[0];assert.match(tag,/type="text"/);assert.match(tag,/autocomplete="off"/);assert.match(tag,/phrase-field/);}
 });
+
+test('unsupported masking gives an explicit visible-input notice',()=>{
+ const note={hidden:true};const ctx={CSS:{supports:()=>false},$:()=>({addEventListener(){}}),document:{querySelectorAll:selector=>selector==='[data-phrase-note]'?[note]:[]},window:{addEventListener(){}}};vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function resetPasswordVisibility()')),ctx);assert.equal(note.hidden,false);assert.match(note.textContent,/显示/);
+});
