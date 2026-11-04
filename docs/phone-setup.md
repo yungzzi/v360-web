@@ -1,5 +1,7 @@
 # 手机助手接入：开发验证步骤
 
+> 历史范围：可选手机桥对照路径，不是日常运行依赖。文中的测试数量、待办和运行状态仅代表对应阶段。当前入口见 [文档导航](README.md)，当前规则见 [自动保存](automatic-archive.md) 与 [批次发布](scheduled-publication.md)。
+
 这台手机放在你身边即可，不需要家人操作摄像头。第一步只检查手机 SDK 能否加载及 USB 收发，不接触摄像头。
 
 ## USB 在本项目里的作用
@@ -8,7 +10,7 @@
 
 ADB 还用于安装、启动助手以及检查原 App 的设备设置页信息。已经取得的 DID 存在本地私有配置，重新插线无需重新获取。账号登录和账号设备列表通过后端的 HTTPS 请求完成，不依赖 USB，也不是读取原 App 的私有数据库。自建网页的用户认证是另一个独立层。
 
-手机桥目前用于开发验证。服务器独立运行的通信层及长期部署方案尚未完成，不能把当前 USB 接入等同于已经实现无人值守云端服务。
+手机桥仅用于开发对照。后续已经实现并部署无手机通信后端，见 [无手机后端](native-backend.md)；下面保留 USB 路径，日常云端使用不需要重复执行。
 
 ## 1. 连接你身边的手机
 
@@ -17,7 +19,7 @@ ADB 还用于安装、启动助手以及检查原 App 的设备设置页信息�
 3. 在 Windows PowerShell 中执行下面的命令。WSL 的 `\\wsl.localhost\...` 路径可能被 `RemoteSigned` 视为远程来源，因此这里为每次启动的子进程指定执行策略；不会修改当前用户或整台电脑的执行策略。每一步都是显式操作；脚本不会自动选择多台设备中的某一台。
 
 ```powershell
-$project = '\\wsl.localhost\Ubuntu\home\yungzzi\workspace\04_tools-and-scripts\v360-web'
+$project = '\\wsl.localhost\Ubuntu\home\YOUR_LINUX_USER\src\v360-web'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps1" -Action devices
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps1" -Action install
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps1" -Action open
@@ -38,7 +40,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$project\tools\phone.ps
 4. 执行基础检查：
 
 ```bash
-cd /home/yungzzi/workspace/04_tools-and-scripts/v360-web
+cd ~/src/v360-web  # 替换为实际克隆目录
 uv run v360 pair-bridge
 uv run v360 bridge-check
 ```

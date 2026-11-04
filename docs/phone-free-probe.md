@@ -1,5 +1,7 @@
 # 脱离实体手机：兼容运行可行性验证
 
+> 历史范围：无手机后端形成前的可行性实验。文中的测试数量、待办和运行状态仅代表对应阶段。当前入口见 [文档导航](README.md)，当前规则见 [自动保存](automatic-archive.md) 与 [批次发布](scheduled-publication.md)。
+
 日期：2026-10-29。开发分支：`feat/phone-free-transport-probe`。
 
 ## 两条路线
@@ -13,7 +15,7 @@ Android 兼容路线：当前 WSL 为 x86_64，用户没有 `/dev/kvm` 读写权
 ## 已实际运行
 
 ```bash
-cd /home/yungzzi/workspace/04_tools-and-scripts/v360-web
+cd ~/src/v360-web  # 替换为你的实际克隆目录
 .venv/bin/python tools/probe_phone_free.py
 .venv/bin/python tools/probe_phone_free.py --initialize
 .venv/bin/python tools/probe_phone_free.py --connect

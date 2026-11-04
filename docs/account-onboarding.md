@@ -19,7 +19,7 @@ uv run v360 import-cloud-apk /path/to/the/analyzed.apk
 在 WSL 终端运行：
 
 ```bash
-cd ~/workspace/04_tools-and-scripts/v360-web
+cd ~/src/v360-web  # 替换为实际克隆目录
 uv run v360 cloud-login
 ```
 
