@@ -49,6 +49,7 @@ from .publication import Publication, retry_once
 from .sessions import COOKIE, REMEMBER_SECONDS, SessionStore
 from .store import RecordingStore
 from .streaming import StreamManager
+from .web_password import WebPassword
 
 
 class ListRequest(BaseModel):
@@ -76,6 +77,12 @@ class BackupRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     remember: bool = False
+    password: str | None = Field(default=None, max_length=256)
+
+
+class PasswordRequest(BaseModel):
+    current_password: str = Field(max_length=256)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class PinRequest(BaseModel):
@@ -111,7 +118,17 @@ def create_app(
 
     streams = StreamManager(config_path, lock, before_subscribe=yield_background)
     media_sessions = {}
-    sessions = SessionStore(root, access_token)
+    password_store = WebPassword(root)
+    sessions = SessionStore(root, access_token + password_store.binding())
+    password_guard = threading.Lock()
+    login_attempts = []
+
+    def password_budget():
+        now = time.monotonic()
+        login_attempts[:] = [stamp for stamp in login_attempts if stamp > now - 60]
+        if len(login_attempts) >= 5:
+            raise HTTPException(429, "Too many password attempts; try again in one minute")
+        login_attempts.append(now)
     bearer = HTTPBearer(auto_error=False)
 
     def local_controls(request: Request):
@@ -191,9 +208,13 @@ def create_app(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     ):
         same_origin(request)
-        if credentials is None or not valid_token(credentials.credentials):
-            raise HTTPException(401, "Authentication required")
-        key = sessions.issue(body.remember, request.cookies.get(COOKIE, ""))
+        with password_guard:
+            if credentials is None or not valid_token(credentials.credentials):
+                password_budget()
+                if not password_store.verify(body.password, access_token):
+                    raise HTTPException(401, "Authentication required")
+                login_attempts.clear()
+            key = sessions.issue(body.remember, request.cookies.get(COOKIE, ""))
         if key is None:
             raise HTTPException(429, "Too many signed-in devices")
         response.set_cookie(
@@ -206,6 +227,19 @@ def create_app(
             secure=request.url.scheme == "https" or os.environ.get("V360_SECURE_COOKIES") == "1",
         )
         return {"authenticated": True, "remembered": body.remember}
+
+    @app.post("/api/auth/password", dependencies=[Depends(authorize)])
+    def change_browser_password(body: PasswordRequest, request: Request):
+        same_origin(request)
+        with password_guard:
+            password_budget()
+            if not (password_store.verify(body.current_password, access_token) or valid_token(body.current_password)):
+                raise HTTPException(401, "Current password was not accepted")
+            password_store.change(body.new_password)
+            sessions.fingerprint = sessions.digest(access_token + password_store.binding())
+            media_sessions.clear()
+            login_attempts.clear()
+        return {"changed": True, "sign_in_again": True}
 
     @app.delete("/api/auth/session")
     def logout_session(request: Request, response: Response):

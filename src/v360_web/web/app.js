@@ -53,9 +53,9 @@ async function logout(){clearHistoryCache();mediaSessionUntil=0;
   catch{status('退出未完成，请检查网络后重试。');}
 }
 $('login-form').addEventListener('submit',async event=>{
-  event.preventDefault();const candidate=$('token').value.trim();
-  try{const response=await appFetch('/api/auth/login',{method:'POST',headers:{Authorization:'Bearer '+candidate,'Content-Type':'application/json'},body:JSON.stringify({remember:$('remember').checked})});
-    if(!response.ok){$('login-message').textContent=response.status===429?'登录设备数量已达上限，请先退出其他设备。':'验证未通过，请检查网页访问令牌。';return;}
+  event.preventDefault();const candidate=$('token').value;
+  try{const response=await appFetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:candidate,remember:$('remember').checked})});
+    if(!response.ok){$('login-message').textContent=response.status===429?'尝试次数过多，请稍等一分钟再试。':'密码不正确，请重新输入。';return;}
     showDashboard();
   }catch{$('login-message').textContent='无法连接服务，请检查网络后重试。';}
 });
@@ -344,3 +344,18 @@ setInterval(()=>{if(batchPublicationEnabled&&signedIn&&!serviceStopped&&!$('libr
 $('open-management').addEventListener('click',()=>$('management-dialog').showModal());
 $('close-management').addEventListener('click',()=>$('management-dialog').close());
 $('today-recordings').addEventListener('click',()=>changeDay(new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai'}).format(new Date())));
+
+$('password-form').addEventListener('submit',async event=>{
+ event.preventDefault();
+ const next=$('new-password').value;
+ if(next!==$('confirm-password').value){$('password-message').textContent='两次新密码不一致。';return;}
+ const button=$('save-password');button.disabled=true;
+ try{
+  const response=await appFetch('/api/auth/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:$('current-password').value,new_password:next})});
+  if(!response.ok){$('password-message').textContent=response.status===429?'尝试次数过多，请稍等一分钟。':'修改未成功，请检查当前密码和新密码长度。';return;}
+  $('password-form').reset();showLogin();$('login-message').textContent='密码已修改，请用新密码登录。其他设备也需重新登录。';
+ }catch{$('password-message').textContent='暂时无法连接服务，请稍后再试。';}
+ finally{button.disabled=false;}
+});
+
+$('management-dialog').addEventListener('close',()=>{$('password-form').reset();$('password-message').textContent='';});
