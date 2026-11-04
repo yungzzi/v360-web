@@ -360,18 +360,22 @@ $('password-form').addEventListener('submit',async event=>{
 
 $('management-dialog').addEventListener('close',()=>{$('password-form').reset();$('password-message').textContent='';});
 
+
 function resetPasswordVisibility(){
  document.querySelectorAll('[data-password-toggle]').forEach(button=>{
-  const field=$(button.dataset.passwordToggle);field.type='password';
-  button.textContent='显示并输入中文';button.setAttribute('aria-pressed','false');
+  const field=$(button.dataset.passwordToggle);field.classList.remove('phrase-visible');
+  button.setAttribute('aria-label','查看输入内容');button.setAttribute('aria-pressed','false');
  });
 }
 document.querySelectorAll('[data-password-toggle]').forEach(button=>button.addEventListener('click',()=>{
- const field=$(button.dataset.passwordToggle),show=field.type==='password';
+ const field=$(button.dataset.passwordToggle),show=!field.classList.contains('phrase-visible');
  const start=field.selectionStart,end=field.selectionEnd;
- field.type=show?'text':'password';
- button.textContent=show?'隐藏密码':'显示并输入中文';button.setAttribute('aria-pressed',String(show));
+ field.classList.toggle('phrase-visible',show);
+ button.setAttribute('aria-label',show?'隐藏输入内容':'查看输入内容');button.setAttribute('aria-pressed',String(show));
  field.focus();if(start!==null&&end!==null)field.setSelectionRange(start,end);
 }));
 $('management-dialog').addEventListener('close',resetPasswordVisibility);
 window.addEventListener('pagehide',resetPasswordVisibility);
+if(!CSS.supports('-webkit-text-security','disc')){
+ document.querySelectorAll('[data-phrase-note]').forEach(note=>{note.hidden=false;note.textContent='当前浏览器无法遮盖口令，输入内容将显示在屏幕上。';});
+}
