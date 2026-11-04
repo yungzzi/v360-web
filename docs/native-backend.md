@@ -1,6 +1,6 @@
-# 无实体手机的本地 PPCS 后端
+# 无手机 PPCS 后端
 
-2026-10-29 已验证并设为本机默认适配器：`native-arm64`。本阶段不依赖实体手机、ADB、Windows Python 或完整 Android 系统；使用 QEMU user-mode 加载私有的 ARM64/Bionic 库，仍属于 Android 库兼容运行。未取得原生 glibc Linux SDK。
+当前运行适配器为 `native-arm64`，已用于本地及 Docker 云端部署。本阶段不依赖实体手机、ADB、Windows Python 或完整 Android 系统；使用 QEMU user-mode 加载私有的 ARM64/Bionic 库，仍属于 Android 库兼容运行。未取得原生 glibc Linux SDK。
 
 ## 结构
 
@@ -16,7 +16,7 @@ FastAPI / Python CameraClient
 
 工作进程没有创建 RPC 网络监听端口。普通用户即可运行，不使用 KVM，不安装全局 binfmt，也不改变系统或手机网络设置。API 的网页访问认证仍独立保留。
 
-## 已完成的真实验证
+## 早期本地实机验证（2026-10-29）
 
 - 停止项目手机助手，并移除它的 `tcp:8766` USB 转发；原 V360 Pro App 未修改。
 - 无手机桥令牌、无 Windows Python 配置的客户端完成真实设备认证。
@@ -30,10 +30,12 @@ FastAPI / Python CameraClient
 
 ## 当前使用
 
+源码不包含私有 SDK 或 Android 运行库；新机器须先准备它们和 QEMU/交叉构建工具，不能只克隆后直接开流。Docker 所需目录迁移见 [部署说明](docker-deployment.md)。
+
 已有私有运行文件、SDK 和设备参数的本机可直接运行：
 
 ```bash
-cd /home/yungzzi/workspace/04_tools-and-scripts/v360-web
+cd ~/src/v360-web  # 替换为你的实际克隆目录
 .venv/bin/v360 bridge-check
 .venv/bin/v360 connect-check
 .venv/bin/v360 recordings

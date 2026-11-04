@@ -1,5 +1,7 @@
 # 无手机实时取流：短时验证版
 
+> 历史范围：初期有限时长取流实验。文中的测试数量、待办和运行状态仅代表对应阶段。当前入口见 [文档导航](README.md)，当前规则见 [自动保存](automatic-archive.md) 与 [批次发布](scheduled-publication.md)。
+
 2026-10-29，本机 WSL 的 `native-arm64` 后端已从真实 4G 摄像头取得实时视频。这个功能建立实时开流、解帧和转码基础，当前输出有限时长的预览文件；持续网页直播播放器尚未实现。
 
 ## 使用
@@ -7,7 +9,7 @@
 在已有私有设备配置、SDK 和运行库的本机执行：
 
 ```bash
-cd /home/yungzzi/workspace/04_tools-and-scripts/v360-web
+cd ~/src/v360-web  # 替换为你的实际克隆目录
 .venv/bin/v360 live-capture --seconds 8
 ```
 

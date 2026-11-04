@@ -1,5 +1,7 @@
 # 首版软件验证与真机验收边界
 
+> 历史范围：2026-10-29 首版验收汇总。文中的测试数量、待办和运行状态仅代表对应阶段。当前入口见 [文档导航](README.md)，当前规则见 [自动保存](automatic-archive.md) 与 [批次发布](scheduled-publication.md)。
+
 日期：2026-10-29。开发分支：`feat/ppcs-recording-bootstrap`。
 
 ## 已执行的软件检查

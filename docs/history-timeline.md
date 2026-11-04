@@ -1,144 +1,23 @@
-# History timeline and snapshots
+# 时间轴与快照
 
-## Scope
+历史页按设备本地日期显示录像，支持全天、六小时和一小时范围。默认显示可直接回放项，也能查看所有已发现条目；日期数量仅代表已发现记录，不证明 SD 目录完整。
 
-Device-local date navigation, current-month known recording dates, day / 6-hour / 1-hour timeline, direct clip selection and time lookup. Playback cursor follows the selected clip. Green means a verified local original still exists; amber means only catalog metadata is available. Clicking amber explicitly starts download followed by playback preparation. The existing list download button now also continues to playback after download.
+## 拖动和播放
 
-The timeline reads SQLite and checks local files only; it never initiates discovery, wakes the camera or runs FFmpeg. A separate explicit catalog-update button retains that responsibility. All day markers are independent of the list's 10-item pagination. Responses are bounded to the newest 10,000 markers with an explicit truncation flag. Current-month date counts are known catalog entries, not proof of complete SD coverage.
+蓝色细线支持鼠标、触摸和键盘。拖动时更新所选时间，松手后只提交一次选择；落在片段内则定位到对应位置，落在空白处只吸附到下一段，没有后续片段则提示当天已结束。不会吸附到细线前面的片段。
 
-Start timestamps remain camera-local strings. No timezone conversion is applied. Marker widths use device-reported duration as an approximate hint (positive values up to one hour); unknown duration is shown as a start marker. Minimum display width makes short clips visible, so visual width is not precise at full-day scale. Empty areas are not a guarantee that the SD card contains no recording. Seeking is clamped to the actual browser-reported file duration.
+同一文件内跳转复用播放器。任务忙时保留最新选择，不强迫先点击上一段/下一段；日期、页面或登录状态改变后丢弃旧意图，避免迟到任务覆盖当前页面。
 
-Live and replay snapshots use the current decoded browser frame and trigger a JPEG download to the viewing device. They do not record video, use the microphone, contact the camera again or create server files.
+标记宽度使用设备报告时长估算，短片有最小显示宽度，不等于精确占时。目录异常和未知时长不能被空白或窄条掩盖；最终播放器位置受实际文件时长限制。
 
-## Validation boundaries
+## 读取与准备
 
-Authenticated API tests cover device isolation, dates, full-day vs paginated lists, missing/invalid duration and private-field exclusion. Browser acceptance uses an isolated fixture database with synthetic dates and an existing camera sample, not a new camera connection. Edge playback, timeline selection, date changes, playback cursor and mobile-width overflow were checked. Snapshot generation and download initiation were observed; the browser automation download-event wait timed out, so downloaded-file persistence is not yet accepted. Actual Android/iOS playback is still unverified.
+时间轴只读取本地目录和文件状态，不因拖动自动查询整张 SD 卡。已准备好的文件直接播放；显式选择未准备项可能需要下载和转换。服务器档会提前准备完整网页版本，批次到点后才公开；细节见 [自动保存](automatic-archive.md)。
 
-Talkback and auxiliary recordings are explicitly excluded. Thumbnail grids, battery calibration, bounded live reconnection and camera settings remain follow-up work. No server retention or transfer-budget increase is part of this change.
+完整网页版本优先。按需播放仍支持三十秒窗口及下一窗口预取，使用同一个转换任务限制；文件切换和来不及处理时仍可能短暂停顿，不能承诺无缝播放。目录采用有时效的浏览器缓存，退出会清除，媒体访问仍检查身份与发布时间，见 [回放性能](history-performance.md)。
 
-## Drag-to-seek revision
+## 快照和管理
 
-Playback is above the timeline. The always-visible blue cursor is a native range control supporting mouse, touch and keyboard. Input updates selection and pauses playback; release commits one seek/download operation. Gaps preserve selection and report the next known recording without silently downloading it. Previous/next-clip buttons allow explicit gap skipping. Same-file seeks reuse the loaded player. File management and backup settings are collapsed, preserving download/pin capabilities outside the main viewing flow.
+“保存当前画面”使用浏览器已解码画面下载 JPEG 到当前访问设备，不重新连接摄像头，不录像、不使用麦克风、不在服务器保存截图。文件下载、锁定保留、同步和失败信息在管理入口中处理，主界面保留日期、播放器和时间轴。
 
-GitHub synchronization is source archiving, not a prerequisite for this locally built Docker Hub release process. The server runs an already-installed compose.yaml with a digest-pinned image. compose.ops.yaml is an explicitly selected, network-disabled backup overlay with an additional backups bind mount, not a second resident backend.
-
-## Release and preparation diagnosis (2026-11-01)
-
-The old range handler paused on pointerdown but only resumed on change. A press/release without a value change (including dragging back to the starting value) therefore left the video paused. It also disabled/dropped new timeline selections while a job ran. The release handler now commits once per gesture regardless of value changes, handles either native change/pointerup ordering and retains the latest pending selection while busy. Cancelled gestures do not submit. Keyboard input remains supported. Pending selections are discarded on logout/date/tab changes.
-
-Six JavaScript regression checks exercise the real production handlers in a DOM event harness, including both release orderings, unchanged release, cancel and busy selection. Run `node tests/replay_controls.cjs` from the checkout (Windows may pipe the file into Node and supply the absolute app.js path).
-
-The screenshot-selected 06:33:37 lies inside the saved clip starting 06:32:51, whose directory duration is 106 seconds. Slow preparation at this time is not explained by a catalog gap. The original video is HEVC, 1920x1080, around 15 fps. Native FFmpeg runs within the app's existing 1 CPU/768 MiB container limits. Full-file conversion and independent output verification precede browser playback. The following single bounded 15-second encode-only samples ran on the same server/container/source (not whole-file or repeated throughput estimates): 1280x720 veryfast 6.952s; 1280x720 ultrafast 6.556s; 960x540 superfast 4.993s. These do not justify claiming an unchanged-quality large speedup, so this patch preserves the output profile and resource caps.
-
-Conversion now reads FFmpeg progress and reports processed/total recording seconds plus elapsed waiting time. Validation remains a separate indeterminate stage. Result metadata records conversion and validation elapsed times. Existing validated caches remain reusable; originals are unchanged. Starting browser playback before the whole clip is prepared remains follow-up work, not part of this fix.
-
-## Bounded window playback
-
-Uncached recordings now prepare the aligned 30-second window containing the chosen offset. Input seeking happens before decoding; output duration is capped at the recording tail. Existing complete previews retain priority. Independent window names preserve concurrent clients at different positions; parent recording leases and active-file guards cover all windows. Window files share the existing preview quota and cleanup eligibility, and require the same media authentication as full previews.
-
-The browser subtracts the window start for player seeking and adds it for camera-local timeline display. At a window end it prepares the next window automatically, stopping at the original end. First preparation is bounded to one window, but uncached window boundaries can still pause while the next window is prepared. Background prefetch and seamless concatenation are follow-up work, not implemented in this first stage. Full-resolution originals remain unchanged.
-
-Local integration checks cover a 65-second synthetic recording: middle window 30 seconds, final window 5 seconds, invalid/out-of-range offsets, authenticated access, cache reuse, cleanup without removing originals. Edge fixture acceptance selected 12:00:58, then automatically opened window start=60 (5-second tail), readyState=4. This is synthetic acceptance; server timing and physical camera footage acceptance are separate.
-
-## One-window lookahead
-
-Playback's playing event requests only the next window of the same already-saved recording. A detached poll never blocks player controls or shows foreground-job progress. At the boundary the player reuses the in-flight/result promise. A low-priority prepare occupies the same single worker/operation lock, never another encoder. Duplicate prefetch is rejected. Foreground jobs cancel that worker and acquire the lock with a bounded wait; live requests also request cancellation. Leaving playback requests cancellation, and abandoned network requests remain bounded to one window and the existing preparation deadline. A new selected position replaces the queued intent; waiting for prefetch does not force preparation of obsolete intent.
-
-Cache, source integrity verification, image quality and CPU/memory caps are unchanged. Preparing a window before the old one ends reduces boundary waiting but is not gapless playback: file/player replacement still has loading overhead, and a late seek or a busy server can outpace preparation.
-
-Acceptance: backend worker checks cover duplicate prefetch and foreground cancellation; local Edge fixture progressed from offset 28 to window start=30 at readyState=4 and showed next-window readiness. Physical mobile and real-camera footage acceptance must be reported separately.
-
-## Half-hour ready archive and 15 GiB combined budget
-
-Server mode checks recent SD metadata every 30 minutes. The previous daily transfer cap is removed for unlimited mobile data, while the local lightweight profile retains its limits. Each server cycle remains bounded to 10 transfer attempts / 64 MiB, 10 local preparation attempts and a cooperative five-minute work window. No accelerated ten-minute backlog wakeups remain; foreground interruptions retry on the normal interval. Individual SDK/media operation deadlines and retry backoff remain in force. Battery readings are not used as a guessed low-battery cutoff: calibration is still pending, and no additional connection is made just to read battery.
-
-After bounded downloads close their camera sessions, the same background worker prepares full browser-compatible files, newest saved originals first. Existing saved originals are not downloaded again. Failed preparation has its own backoff. Preparation is local work but still cooperatively yields to foreground viewing. Fifteen GiB is a combined limit for originals, full/window previews and live cache, not fifteen GiB per folder. Under pressure the oldest eligible recording and all its browser files are evicted together. Pins, leases, active responses and foreign files remain protected; impossible admission fails before deleting eligible originals. The 8 GiB system free-space reserve remains. Pair cleanup prioritizes device recording time so historical backfill cannot displace newer footage merely because it was downloaded later.
-
-The default timeline shows complete browser-ready recordings. The alternate all-known view permits explicitly selecting recent or unprepared device entries. Releasing in a gap snaps to the nearest real interval and starts that clip; a tie selects the later clip. Readiness count, oldest ready timestamp and span are exposed; span is not a promise of a complete SD backup or continuous recording. The 15 GiB budget is estimated to cover roughly 14-16 days at two observed daily workloads, not a guarantee under increased activity. Source and browser quality remain unchanged.
-
-Local checks: combined quota/pair eviction/pin preservation, preparation without repeat downloads even after historical daily usage, bounded failed preparations, half-hour scheduling and snapping tests. Edge synthetic fixture snapped 12:03:00 to 12:00:00 and played a pre-generated full preview. Cloud camera acceptance must be recorded separately.
-
-## Forward-only gap snapping and sparse timeline explanation
-
-When the selected second is inside a recording, preserve the exact position. Otherwise choose the first later interval in the current source filter. No later interval means pause and show an end-of-day message; never fall back to a preceding clip. The date chip explicitly labels its number as discovered entries, and the timeline heading gives ready vs discovered counts in the ready-only view.
-
-Read-only production diagnosis on 2026-11-01: today's 231 discovered entries included 91 originals and 27 complete browser previews; the ready-only timeline therefore showed 27 intervals. All dates combined: 463 originals, 31 ready, 186 pending including 13 failures. The previous half-hour cycle saved 10 and prepared 10 successfully. Those numbers are a point-in-time observation, not future completeness or a next-day catch-up promise. Existing originals can be prepared without new camera downloads; older SD files can be backfilled while they remain on the device. Missing/invalid catalog entries and overwritten/unrecorded footage remain distinct limitations.
-
-## Ten-minute sequential pipeline, three-day history scope
-
-Server policy now checks every 10 minutes, with no daily, file-count or batch-byte quota. The single worker remains bounded by a cooperative five-minute work window, existing per-operation timeouts, free-space checks and foreground cancellation. Each pending clip is downloaded then fully prepared before the next clip is attempted. Verified originals skip download. Candidates are newest first, restricted to the last 72 hours for automatic catch-up; older originals are preserved, not proactively converted or deleted by this change. The 15 GiB paired retention budget remains unchanged.
-
-Recent 24-hour metadata is checked each cycle. When the known work queue is empty, one of the previous two calendar days is queried; successful scans are remembered for that date, so idle cycles do not repeatedly wake the device to rescan old days. Invalid catalog entries remain explicitly incomplete. Thirty minutes is a readiness target after recording finishes, not a guarantee during device outages, failures or workload beyond available processing capacity. The UI distinguishes total awaiting browser readiness from missing originals, avoiding the earlier misleading backlog count.
-
-Checks include more than ten clips processed in one cycle, download/prepare event ordering per clip, exclusion of a ten-day-old original, persisted history cursor, operation-time window, foreground cancellation, duplicate/prepared-file handling and unchanged storage protections. Battery cutoff is not guessed from uncalibrated readings; no additional battery-only camera sessions are introduced.
-
-
-## 2026-11-02: transient connection recovery and visible backlog
-
-Read-only production inspection at 11:04 HKT found 356 indexed recordings for
-November 2, 278 full browser-ready files and 78 pending; 59 records carried
-transport errors (56 sdk_connect, 3 sdk_read). These error names identify the
-failed stage, not the underlying modem, camera sleep or network cause.
-
-Previously every file error inherited a one-hour backoff, increasing to one day
-after three attempts. A device connection outage also continued through other
-files. Connection setup failure now ends the current batch; the normal ten-minute
-server schedule retries, without treating untouched files as failed. Transport
-errors use a ten-minute retry delay. Existing long transport backoffs are capped
-at ten minutes after the last recorded update; authentication errors remain
-separate and are never automatically bypassed. Last SDK numeric error is kept in
-backup status for later diagnosis. This does not prove connection failures cured.
-
-Archive summary now separates known pending clips whose reported end is within
-the last thirty minutes from older pending clips, plus an overlapping failed
-retry count. Counts cover the current three-day processing scope, not only the
-selected timeline date, and never assert that the SD directory is complete.
-Readiness is based on full verified browser copies, not original-file presence.
-
-
-A further production check found a catalog connection failure prevented all local
-preparation that round. Server mode now catches transient catalog transport errors
-and continues preparing already verified originals without another camera request.
-Authentication failures still stop the cycle. UI explicitly reports this degraded
-mode. Catalog completeness is preserved, never inferred from an offline cycle.
-
-
-## 2026-11-02 durable recovery follow-up
-
-Catalog refresh overwrites recording.updated_at, so it cannot serve as a retry
-clock. One persisted v2 migration releases existing transport backoffs once;
-subsequent failures use backup_retries.next_try directly. Recovery stores a fixed
-initial three-day floor per device; unfinished indexed clips do not disappear
-when they become four days old. Candidate order alternates newest and oldest.
-Transport setup retries at most five times within a forty-second exchange budget,
-with cancellation between attempts; authentication is never retried. Local-only
-cycles also validate downloaded_unverified files, with a strict no-network
-fallback flag. A started local conversion can finish past the five-minute round
-boundary; cancellation and individual conversion timeout remain effective.
-These changes require real failed-file download acceptance, separately from
-existing-original conversion and automated checks.
-
-
-Production candidate aa1b641 / docker.17 was deployed for bounded acceptance.
-169 Python checks and 7 JavaScript checks pass. Of three preselected November 2
-sdk_connect failures, 03:59:07 and 09:20:59 were newly downloaded, fully validated,
-converted, and served via authenticated MP4 range requests (206, 1024 bytes).
-00:37:17 still failed after five connection attempts with SDK -3. Thus this is
-partial recovery evidence, not reliable unattended download acceptance. Request
-an original-App open/close comparison to investigate low-power connectivity;
-no assumption that an omitted wake API exists. Feature remains unmerged pending
-further connection diagnosis. Private server records: recovery-targets-20261102.json
-and recovery-three-results-20261102.json under backups/.
-
-
-Follow-up: after user reported opening original-App live for about ten seconds
-and closing it, the remaining 00:37:17 target downloaded and validated in 27.3s.
-Its full browser copy also passed validation and authenticated 206 range delivery.
-All three preselected targets now have verified full web files. The next automatic
-cycle queried successfully and was observed downloading additional files (800
-originals and 382 full browser copies at check time). This temporal comparison
-supports investigating low-power/online state, but does not establish causality:
-connection recovery could also be intermittent and the exact App-close interval
-was not controlled. Independent sleeping-device wake and sustained unattended
-throughput remain unaccepted; keep feature branch open. Private detailed evidence:
-backups/app-open-comparison-20261102.json and app-comparison-acceptance-20261102.json.
+相关 Node 检查位于 `tests/replay_controls.cjs` 和 `tests/history_cache.cjs`；合成浏览器检查不能替代所有实体手机验收。历史范围和后端访问测试见 `tests/test_recording_library.py`。

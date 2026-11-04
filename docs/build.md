@@ -1,6 +1,6 @@
 # 本地工具与 Android 助手构建
 
-开发环境为 WSL Ubuntu x86_64。使用已经安装的 `uv`。系统没有免密 sudo，本项目将额外工具解包到 `.tools`，没有执行系统包安装。
+开发环境为 WSL Ubuntu x86_64。使用已经安装的 `uv`。开发脚本可将额外工具局部解包到 `.tools`，不要求修改全局工具链。日常原生后端不需要 Android 助手；本页 Android 构建仅用于可选的对照路径。
 
 ## Python 与媒体工具
 
@@ -35,7 +35,7 @@ uv run v360 import-apk /absolute/path/to/the/original.apk
 python3 tools/build_android.py
 ```
 
-私有配置已经存在时，`init-config` 不会覆盖它。当前工作区已经完成导入，不需要重复执行。
+私有配置已经存在时，`init-config` 不会覆盖它。只有新环境需要首次导入；已有私有配置及 SDK 时不要重复覆盖。
 
 构建脚本执行 javac、D8、aapt2、16 KiB ZIP 对齐和 APK 签名，然后执行 `apksigner verify` 与对齐检查。产物为：
 
