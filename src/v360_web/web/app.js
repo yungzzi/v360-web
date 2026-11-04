@@ -45,7 +45,7 @@ async function poll(){
   try{const response=await appFetch('/api/status',{});if(response.status===401){showLogin();return;}if(!response.ok)return;const state=await response.json();renderLenses(state.lenses);$('viewers').textContent=state.live.viewers+' 人';renderBackup(state.backup);const b=state.battery||{};const pct=b.percent;const fill=$('battery-fill');fill.style.width=pct==null?'0%':Math.max(0,Math.min(100,pct))+'%';$('battery-percent').textContent=pct==null?'—':pct+'%';$('battery-badge').classList.toggle('low',pct!=null&&pct<=20);$('battery-badge').classList.toggle('stale',!!b.stale);$('battery-charge').hidden=b.charging!==true;const batteryLabel=pct==null?'尚未取得电量':'电量 '+pct+'%'+(b.updated_at?'，读取于 '+new Date(b.updated_at*1000).toLocaleString():'');$('battery-badge').setAttribute('aria-label',batteryLabel);$('battery-badge').title=batteryLabel;$('battery').textContent=b.percent==null?'未知':b.percent+'%';$('charging').textContent=b.charging==null?'未知':b.charging?'设备报告充电中':'未报告外接充电';$('battery-time').textContent=b.updated_at?new Date(b.updated_at*1000).toLocaleString()+(b.stale?' · 待读取更新':' · 最近读取'):'尚未读取电量';$('local-controls').hidden=!state.local_shutdown_available;}
   catch{/* Keep the active player's error reporting independent of status polling. */}
 }
-function showLogin(){if($('management-dialog').open)$('management-dialog').close();clearHistoryCache();mediaSessionUntil=0;clearReplay();resetPlayer();signedIn=false;$('login').hidden=false;$('dashboard').hidden=true;$('logout').hidden=true;$('token').value='';}
+function showLogin(){resetPasswordVisibility();if($('management-dialog').open)$('management-dialog').close();clearHistoryCache();mediaSessionUntil=0;clearReplay();resetPlayer();signedIn=false;$('login').hidden=false;$('dashboard').hidden=true;$('logout').hidden=true;$('token').value='';}
 function showDashboard(){serviceStopped=false;signedIn=true;$('token').value='';$('login').hidden=true;$('dashboard').hidden=false;$('logout').hidden=false;poll();}
 async function logout(){clearHistoryCache();mediaSessionUntil=0;
   resetPlayer();
@@ -53,7 +53,7 @@ async function logout(){clearHistoryCache();mediaSessionUntil=0;
   catch{status('退出未完成，请检查网络后重试。');}
 }
 $('login-form').addEventListener('submit',async event=>{
-  event.preventDefault();const candidate=$('token').value;
+  event.preventDefault();resetPasswordVisibility();const candidate=$('token').value;
   try{const response=await appFetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:candidate,remember:$('remember').checked})});
     if(!response.ok){$('login-message').textContent=response.status===429?'尝试次数过多，请稍等一分钟再试。':'密码不正确，请重新输入。';return;}
     showDashboard();
@@ -359,3 +359,19 @@ $('password-form').addEventListener('submit',async event=>{
 });
 
 $('management-dialog').addEventListener('close',()=>{$('password-form').reset();$('password-message').textContent='';});
+
+function resetPasswordVisibility(){
+ document.querySelectorAll('[data-password-toggle]').forEach(button=>{
+  const field=$(button.dataset.passwordToggle);field.type='password';
+  button.textContent='显示并输入中文';button.setAttribute('aria-pressed','false');
+ });
+}
+document.querySelectorAll('[data-password-toggle]').forEach(button=>button.addEventListener('click',()=>{
+ const field=$(button.dataset.passwordToggle),show=field.type==='password';
+ const start=field.selectionStart,end=field.selectionEnd;
+ field.type=show?'text':'password';
+ button.textContent=show?'隐藏密码':'显示并输入中文';button.setAttribute('aria-pressed',String(show));
+ field.focus();if(start!==null&&end!==null)field.setSelectionRange(start,end);
+}));
+$('management-dialog').addEventListener('close',resetPasswordVisibility);
+window.addEventListener('pagehide',resetPasswordVisibility);
