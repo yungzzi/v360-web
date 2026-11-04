@@ -24,7 +24,7 @@ def test_session_survives_restart_and_stores_no_raw_secrets(tmp_path):
         cookie = client.cookies.get(COOKIE)
         assert response.status_code == 200
         header = response.headers["set-cookie"]
-        for part in ("HttpOnly", "Secure", "SameSite=strict", "Max-Age=604800", "Path=/api/"):
+        for part in ("HttpOnly", "Secure", "SameSite=strict", "Max-Age=1296000", "Path=/api/"):
             assert part in header
         assert client.get("/api/status").status_code == 200
         assert client.post("/api/playback/session").json() == {"ready": True}
@@ -133,3 +133,15 @@ def test_login_cannot_be_minted_from_cookie_alone(tmp_path):
     with TestClient(create_app(tmp_path, TOKEN)) as client:
         login(client)
         assert client.post("/api/auth/login", json={"remember": True}).status_code == 401
+
+
+def test_remembered_session_fixed_fifteen_days(tmp_path, monkeypatch):
+    now = 1800000000
+    monkeypatch.setattr("v360_web.sessions.time.time", lambda: now)
+    store = SessionStore(tmp_path, TOKEN)
+    key = store.issue(True)
+    now += 14 * 86400
+    assert store.valid(key)
+    # Reading a session does not extend the deadline.
+    now += 86400
+    assert not store.valid(key)

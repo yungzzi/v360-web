@@ -7,7 +7,7 @@ import time
 from .store import RecordingStore
 
 COOKIE = "v360_session"
-REMEMBER_SECONDS = 7 * 86400
+REMEMBER_SECONDS = 15 * 86400
 SESSION_SECONDS = 12 * 3600
 
 

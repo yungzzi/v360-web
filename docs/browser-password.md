@@ -55,3 +55,30 @@ https://raw.githubusercontent.com/chromium/chromium/main/third_party/blink/rende
 
 .44（4d6c2e5）已部署，快照20261104T013445.546946Z，自动保存和批次发布
 恢复启用。未更改用户密码。
+
+## 输入安全方案调查（2026-11-04）
+
+原生password字段允许密码管理器自动填充，但具体输入法及厂商安全键盘
+由浏览器、系统决定。inputmode仅是键盘提示，网页不能通过它要求安全
+键盘增加中文。当前普通text加圆点遮盖是中文兼容方案，不等同于原生
+敏感输入保护，也无法阻止普通输入法学习口令。不要用其他网站的密码。
+
+更合适的长期方向是通行密钥（WebAuthn）：由设备指纹、面容或解锁
+验证，网站保存公钥，不需要把中文密码交给输入法。它解决的是避免
+输入，而不是给现有安全键盘增加中文。需要先准备稳定域名、HTTPS及
+设备兼容验证；现有IP地址入口不能直接假定满足RP ID要求。仍应保留
+恢复方式，避免手机丢失后失去访问。此次只调查，不新增通行密钥接口。
+
+另一种选择是原生密码框配合可信密码管理器自动填充，避免逐字输入；
+能否绕过具体手机的键盘限制需要实体设备验证，不保证所有OPPO都可用。
+无需为本站关闭全局安全键盘，也不自制所谓安全键盘来宣称等价保护。
+
+参考：
+- https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/input/password
+- https://html.spec.whatwg.org/multipage/interaction.html#input-modalities:-the-inputmode-attribute
+- https://www.w3.org/TR/webauthn-3/
+- https://developers.google.com/identity/passkeys/
+
+记住登录已改为固定15天（1296000秒），前后端使用相同有效期。已有
+7天会话保持原到期时间，重新登录并勾选后才获得15天，不自动延长旧
+登录；不勾选仍最长12小时，退出或改密码仍可提前撤销。
