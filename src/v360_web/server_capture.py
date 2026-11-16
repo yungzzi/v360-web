@@ -62,6 +62,8 @@ class SegmentFinalizer:
         self.lock = threading.Lock()
         self.closed = False
         self.stop_enqueued = False
+        self.active = False
+        self.last_close_timed_out = False
         self.thread = threading.Thread(
             target=self._run, name="v360-capture-finalize", daemon=True
         )
@@ -76,6 +78,10 @@ class SegmentFinalizer:
                 return True
             except queue.Full:
                 return False
+
+    def caught_up(self):
+        with self.lock:
+            return not self.active and self.queue.empty()
 
     def flush(self, timeout=15):
         event = threading.Event()
@@ -92,16 +98,20 @@ class SegmentFinalizer:
         deadline = time.monotonic() + timeout
         with self.lock:
             self.closed = True
-            enqueue = not self.stop_enqueued
-            self.stop_enqueued = True
-        if enqueue:
-            try:
-                self.queue.put(None, timeout=max(0.0, deadline - time.monotonic()))
-            except queue.Full:
-                return False
+            if not self.stop_enqueued:
+                try:
+                    self.queue.put(None, timeout=max(0.0, deadline - time.monotonic()))
+                except queue.Full:
+                    # Leave stop_enqueued unset so a later close can retry
+                    # once the backlog has drained.
+                    self.last_close_timed_out = True
+                    return False
+                self.stop_enqueued = True
         if wait:
             self.thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        return not self.thread.is_alive()
+        drained = not self.thread.is_alive()
+        self.last_close_timed_out = not drained
+        return drained
 
     def _run(self):
         while True:
@@ -112,7 +122,13 @@ class SegmentFinalizer:
                 if isinstance(job, tuple) and job and job[0] == "flush":
                     job[1].set()
                     continue
-                self._finalize(job)
+                with self.lock:
+                    self.active = True
+                try:
+                    self._finalize(job)
+                finally:
+                    with self.lock:
+                        self.active = False
             finally:
                 self.queue.task_done()
 
@@ -565,6 +581,8 @@ class CaptureManager:
         self.active = None
         self.sources = {WATCH_SOURCE: 0, SCHEDULED_SOURCE: 0}
         self.finalizer = SegmentFinalizer(self)
+        self.shutdown_complete = None
+        self.shutdown_error = None
         self.recover()
 
     @property
@@ -593,18 +611,23 @@ class CaptureManager:
         if not self.enabled:
             return False
         if self.paused:
-            # Do not reopen recording while validation is still over its
-            # backlog; storage pauses can retry after cleanup.
+            # Resume on the next viewing or sampling attempt once validation
+            # has fully drained; missed segments remain gaps.
             if self.error == "capture_finalize_backlog":
-                return False
-            try:
-                maintenance.cleanup_captures(self.root, RESERVATION)
-            except CameraError as error:
-                self.error = error.code
-                return False
-            with self.guard:
-                self.paused = False
-                self.error = None
+                if not self.finalizer.caught_up():
+                    return False
+                with self.guard:
+                    self.paused = False
+                    self.error = None
+            else:
+                try:
+                    maintenance.cleanup_captures(self.root, RESERVATION)
+                except CameraError as error:
+                    self.error = error.code
+                    return False
+                with self.guard:
+                    self.paused = False
+                    self.error = None
         if self.did is None:
             try:
                 self.did = Settings.load(self.config_path).did
@@ -710,6 +733,9 @@ class CaptureManager:
                 "bytes": storage.usage(self.root / "captures"),
                 "limit": storage.CAPTURE_LIMIT,
                 "scheduler_started": bool(self.thread and self.thread.is_alive()),
+                "shutdown_complete": self.shutdown_complete,
+                "shutdown_error": self.shutdown_error,
+                "shutdown_timeout": self.shutdown_error is not None,
             }
 
     def stop_scheduler(self, timeout=3):
@@ -722,4 +748,8 @@ class CaptureManager:
 
     def close(self, timeout=30):
         self.stop_scheduler()
-        return self.finalizer.close(wait=True, timeout=timeout)
+        drained = self.finalizer.close(wait=True, timeout=timeout)
+        with self.guard:
+            self.shutdown_complete = bool(drained)
+            self.shutdown_error = None if drained else "capture_finalize_shutdown"
+        return drained

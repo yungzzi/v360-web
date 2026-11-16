@@ -958,6 +958,67 @@ def test_finalize_backlog_pauses_capture(manager, fragments, monkeypatch):
         assert capture.snapshot()["error"] == "capture_finalize_backlog"
         assert capture.snapshot()["paused"] is True
         assert capture.new_watch() is None
+        release.set()
+        deadline = time.monotonic() + 10
+        while not capture.finalizer.caught_up():
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        assert capture.finalizer.caught_up()
+        recovered = capture.new_watch()
+        assert recovered is not None
+        assert capture.snapshot()["paused"] is False
+        recovered.close(wait=False)
     finally:
         release.set()
         sink.close(wait=False)
+
+
+def test_finalizer_close_retries_after_timeout(manager, tmp_path, monkeypatch):
+    capture, _ = manager
+    finalizer = capture.finalizer
+    finalizer.queue.maxsize = 1
+    monkeypatch.setattr(capture, "register", lambda *args: None)
+    started = threading.Event()
+    release = threading.Event()
+
+    monkeypatch.setattr(
+        server_capture,
+        "probe",
+        lambda path: {"streams": [{"codec_type": "video"}]},
+    )
+
+    def slow_decode(path):
+        started.set()
+        assert release.wait(10)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_decode)
+    first = tmp_path / "first.part"
+    second = tmp_path / "second.part"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    start = datetime(2026, 11, 16, 6)
+    job = lambda path, key: (path, key, WATCH_SOURCE, start, None, False, "0" * 64)
+    try:
+        assert finalizer.submit(job(first, "a" * 32))
+        assert started.wait(5)
+        assert finalizer.submit(job(second, "b" * 32))
+        assert capture.close(timeout=0.2) is False
+        assert capture.snapshot()["shutdown_timeout"] is True
+        assert finalizer.last_close_timed_out is True
+        assert finalizer.thread.is_alive()
+
+        release.set()
+        deadline = time.monotonic() + 10
+        while not finalizer.caught_up():
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        assert finalizer.caught_up()
+        assert capture.close(timeout=5) is True
+        assert capture.snapshot()["shutdown_timeout"] is False
+        assert not finalizer.thread.is_alive()
+        assert finalizer.last_close_timed_out is False
+    finally:
+        release.set()
+        finalizer.close(wait=True, timeout=5)
