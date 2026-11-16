@@ -28,6 +28,7 @@ ZONE = ZoneInfo("Asia/Hong_Kong")
 SEGMENT_SECONDS = 60
 RESERVATION = 8 * 1024**2
 CAPTURE_QUEUE_SIZE = 32
+CAPTURE_FINALIZE_QUEUE_SIZE = 8
 
 
 def now_local():
@@ -53,13 +54,14 @@ def next_slot(now: datetime):
 
 
 class SegmentFinalizer:
-    """Validate sealed segments without delaying the recording writer."""
+    """Single service-level validator for sealed recording segments."""
 
-    def __init__(self, manager):
+    def __init__(self, manager, capacity=CAPTURE_FINALIZE_QUEUE_SIZE):
         self.manager = manager
-        self.queue = queue.Queue()
+        self.queue = queue.Queue(maxsize=capacity)
         self.lock = threading.Lock()
         self.closed = False
+        self.stop_enqueued = False
         self.thread = threading.Thread(
             target=self._run, name="v360-capture-finalize", daemon=True
         )
@@ -69,24 +71,37 @@ class SegmentFinalizer:
         with self.lock:
             if self.closed:
                 return False
-            self.queue.put(job)
-            return True
+            try:
+                self.queue.put_nowait(job)
+                return True
+            except queue.Full:
+                return False
 
     def flush(self, timeout=15):
         event = threading.Event()
         with self.lock:
             if self.closed:
                 return False
-            self.queue.put(("flush", event))
+            try:
+                self.queue.put(("flush", event), timeout=timeout)
+            except queue.Full:
+                return False
         return event.wait(timeout)
 
-    def close(self, wait=True):
+    def close(self, wait=True, timeout=30):
+        deadline = time.monotonic() + timeout
         with self.lock:
-            if not self.closed:
-                self.closed = True
-                self.queue.put(None)
+            self.closed = True
+            enqueue = not self.stop_enqueued
+            self.stop_enqueued = True
+        if enqueue:
+            try:
+                self.queue.put(None, timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Full:
+                return False
         if wait:
-            self.thread.join(timeout=60)
+            self.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        return not self.thread.is_alive()
 
     def _run(self):
         while True:
@@ -172,7 +187,6 @@ class CaptureSink:
         self.done = False
         self.error = None
         self.owner = None
-        self.finalizer = SegmentFinalizer(manager)
         self.guard = threading.RLock()
 
     @property
@@ -230,7 +244,6 @@ class CaptureSink:
             self._publish(event, value, at, mono)
             finished = self.done
         if finished:
-            self.finalizer.close(wait=False)
             self.manager.note_done(self.owner or self)
 
     def _publish(self, event, value, at, mono):
@@ -326,9 +339,12 @@ class CaptureSink:
             self.audio,
             self.digest.hexdigest(),
         )
-        if not self.finalizer.submit(job):
+        if not self.manager.finalizer.submit(job):
             temporary.unlink(missing_ok=True)
-            self.manager.pause("capture_closed")
+            raise CameraError(
+                "capture_finalize_backlog",
+                "Too many sealed segments are waiting for validation.",
+            )
         self.key = None
         self.written = 0
         self.fragments = 0
@@ -338,10 +354,8 @@ class CaptureSink:
         with self.guard:
             self._close(reason)
             finished = self.done
-            if finished:
-                self.finalizer.close(wait=False)
         if wait:
-            self.finalizer.close(wait=True)
+            self.manager.finalizer.flush(60)
         if finished:
             self.manager.note_done(self.owner or self)
 
@@ -377,7 +391,6 @@ class CaptureSink:
             self.path = None
         self.error = code
         self.done = True
-        self.finalizer.close(wait=False)
         self.manager.pause(code)
 
 
@@ -457,13 +470,18 @@ class AsyncCaptureSink:
             event.set()
             return
         event.wait(timeout)
-        self.writer.finalizer.flush(timeout)
+        self.manager.finalizer.flush(timeout)
+
+    def wait_writer(self, timeout=10):
+        """Wait until the writer has sealed and queued its final segment."""
+        self.worker.join(timeout=timeout)
+        return not self.worker.is_alive()
 
     def close(self, reason=None, wait=True):
         self._put(("close", reason), control=True)
         if wait:
             self.worker.join(timeout=60)
-            self.writer.finalizer.close(wait=True)
+            self.manager.finalizer.flush(60)
 
     def _put(self, item, *, control=False):
         if self.done:
@@ -546,6 +564,7 @@ class CaptureManager:
         self.last_finished = None
         self.active = None
         self.sources = {WATCH_SOURCE: 0, SCHEDULED_SOURCE: 0}
+        self.finalizer = SegmentFinalizer(self)
         self.recover()
 
     @property
@@ -574,6 +593,10 @@ class CaptureManager:
         if not self.enabled:
             return False
         if self.paused:
+            # Do not reopen recording while validation is still over its
+            # backlog; storage pauses can retry after cleanup.
+            if self.error == "capture_finalize_backlog":
+                return False
             try:
                 maintenance.cleanup_captures(self.root, RESERVATION)
             except CameraError as error:
@@ -689,10 +712,14 @@ class CaptureManager:
                 "scheduler_started": bool(self.thread and self.thread.is_alive()),
             }
 
-    def close(self):
+    def stop_scheduler(self, timeout=3):
         self.stopping.set()
         self.wake.set()
         thread = self.thread
         if thread:
-            thread.join(timeout=3)
+            thread.join(timeout=timeout)
         self.thread = None
+
+    def close(self, timeout=30):
+        self.stop_scheduler()
+        return self.finalizer.close(wait=True, timeout=timeout)

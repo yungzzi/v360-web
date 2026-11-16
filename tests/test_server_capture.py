@@ -150,7 +150,11 @@ def manager(tmp_path, monkeypatch):
             "bridge": {"adapter": "native-arm64"},
         },
     )
-    return server_capture.CaptureManager(root, config, enabled=True), config
+    capture = server_capture.CaptureManager(root, config, enabled=True)
+    try:
+        yield capture, config
+    finally:
+        capture.close(timeout=5)
 
 
 def feed(sink, init, pieces, *, span=2):
@@ -805,7 +809,7 @@ def test_reopen_live_while_old_segment_finishing_still_records(
         deadline = time.monotonic() + 5
         while not old_sink.done and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert old_sink.done and old_sink.writer.finalizer.thread.is_alive()
+        assert old_sink.done and capture.finalizer.thread.is_alive()
 
         second_viewer = streams.subscribe()
         new_sink = streams.recorder
@@ -816,9 +820,11 @@ def test_reopen_live_while_old_segment_finishing_still_records(
         streams.unsubscribe(second_viewer)
         streams.thread.join(timeout=8)
         assert not streams.thread.is_alive()
-        rows = wait_for_rows(capture.root, minimum=1, timeout=10)
-        assert rows
-        assert old_sink.writer.finalizer.thread.is_alive()
+        deadline = time.monotonic() + 5
+        while not new_sink.done and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert new_sink.done
+        assert capture.finalizer.thread.is_alive()
     finally:
         release.set()
         if first_viewer is not None:
@@ -830,3 +836,128 @@ def test_reopen_live_while_old_segment_finishing_still_records(
     assert len(rows) >= 2
     for row in rows:
         validate_decode(capture.root / row["path"])
+
+
+def test_rapid_reopen_keeps_validation_single_threaded(manager, hevc_bytes, monkeypatch):
+    capture, config = manager
+    streams = StreamManager(config, threading.Lock(), live_source(hevc_bytes), capture=capture)
+    capture.attach(streams)
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def counted_decode(path):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.15)
+            validate_decode(path)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(server_capture, "validate_decode", counted_decode)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 32)
+    try:
+        for _ in range(3):
+            viewer = streams.subscribe()
+            get_event(viewer, "init")
+            get_event(viewer, "fragment")
+            get_event(viewer, "fragment")
+            streams.unsubscribe(viewer)
+            streams.thread.join(timeout=8)
+            assert not streams.thread.is_alive()
+        rows = wait_for_rows(capture.root, minimum=3, timeout=15)
+        assert len(rows) >= 3
+        assert peak == 1
+    finally:
+        streams.close()
+        capture.close(timeout=10)
+
+
+def test_normal_shutdown_drains_slow_tail_segment(manager, hevc_bytes, monkeypatch):
+    capture, config = manager
+    streams = StreamManager(config, threading.Lock(), live_source(hevc_bytes), capture=capture)
+    capture.attach(streams)
+    validation_started = threading.Event()
+    release = threading.Event()
+
+    def slow_decode(path):
+        validation_started.set()
+        assert release.wait(15)
+        validate_decode(path)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_decode)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 32)
+    viewer = None
+    finished = threading.Event()
+
+    def shutdown():
+        capture.stop_scheduler()
+        streams.close()
+        capture.close(timeout=20)
+        finished.set()
+
+    shutdown_thread = None
+    try:
+        viewer = streams.subscribe()
+        get_event(viewer, "init")
+        get_event(viewer, "fragment")
+        get_event(viewer, "fragment")
+        assert validation_started.wait(10)
+        shutdown_thread = threading.Thread(target=shutdown, name="capture-shutdown", daemon=True)
+        shutdown_thread.start()
+        deadline = time.monotonic() + 3
+        while not finished.is_set() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not finished.is_set()
+        release.set()
+        assert finished.wait(20)
+    finally:
+        release.set()
+        if shutdown_thread is not None:
+            shutdown_thread.join(timeout=5)
+        streams.close()
+        capture.close(timeout=10)
+    assert not capture.finalizer.thread.is_alive()
+    rows = wait_for_rows(capture.root, minimum=2, timeout=15)
+    assert len(rows) >= 2
+    for row in rows:
+        validate_decode(capture.root / row["path"])
+
+
+def test_finalize_backlog_pauses_capture(manager, fragments, monkeypatch):
+    capture, _ = manager
+    capture.did = "MATE-capture"
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_decode(path):
+        started.set()
+        assert release.wait(15)
+        validate_decode(path)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_decode)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
+    capture.finalizer.queue.maxsize = 1
+    sink = capture.new_watch()
+    init, pieces = fragments
+    try:
+        feed(sink, init, pieces[:3])
+        assert started.wait(10)
+        sink.close(wait=False)
+        deadline = time.monotonic() + 10
+        while capture.snapshot()["error"] != "capture_finalize_backlog":
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        assert capture.snapshot()["error"] == "capture_finalize_backlog"
+        assert capture.snapshot()["paused"] is True
+        assert capture.new_watch() is None
+    finally:
+        release.set()
+        sink.close(wait=False)

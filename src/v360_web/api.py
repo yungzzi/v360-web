@@ -151,9 +151,10 @@ def create_app(
             capture.start()
         yield
         stopping.set()
-        await asyncio.to_thread(capture.close)
         await asyncio.to_thread(backup.close)
+        await asyncio.to_thread(capture.stop_scheduler)
         await asyncio.to_thread(streams.close)
+        await asyncio.to_thread(capture.close)
         pool.shutdown(wait=True, cancel_futures=True)
 
     app = FastAPI(title="V360 recording API", version=__version__, lifespan=lifespan)

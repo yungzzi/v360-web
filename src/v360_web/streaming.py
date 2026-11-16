@@ -656,5 +656,10 @@ class StreamManager:
             self.shutdown_requested = True
             self.stop.set()
             thread = self.thread
+            recorder = self.recorder
         if thread:
             thread.join(timeout=50)
+        # The live thread only queues the final close; wait for the writer to
+        # seal and enqueue the tail before the service closes validation.
+        if recorder is not None and hasattr(recorder, "wait_writer"):
+            recorder.wait_writer(10)
