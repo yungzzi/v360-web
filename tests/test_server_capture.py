@@ -1,4 +1,5 @@
 import io
+import logging
 import queue
 import subprocess
 import threading
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from v360_web import api as api_module
 from v360_web import maintenance, playback, server_capture, storage
 from v360_web.api import create_app
 from v360_web.backup_policy import BackupPolicy
@@ -250,6 +252,7 @@ def test_unfinished_capture_is_not_indexed(manager, fragments):
     sink.close()
     assert RecordingStore(capture.root).list() == []
     assert not list((capture.root / "captures").glob("*.part"))
+    assert not list((capture.root / "captures").glob("*.pending"))
     assert not list((capture.root / "captures").glob("*.mp4"))
 
 
@@ -742,11 +745,11 @@ def test_normal_frame_rate_slow_validation_continues_next_segment(
         assert validation_started.wait(15)
         frames_before = streams.snapshot()["frames"]
         deadline = time.monotonic() + 8
-        while len(list((capture.root / "captures").glob("*.part"))) < 2:
+        while len(list((capture.root / "captures").glob("*.pending"))) < 2:
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.1)
-        assert len(list((capture.root / "captures").glob("*.part"))) >= 2
+        assert len(list((capture.root / "captures").glob("*.pending"))) >= 2
         deadline = time.monotonic() + 5
         while streams.snapshot()["frames"] - frames_before < 15:
             if time.monotonic() >= deadline:
@@ -1022,3 +1025,82 @@ def test_finalizer_close_retries_after_timeout(manager, tmp_path, monkeypatch):
     finally:
         release.set()
         finalizer.close(wait=True, timeout=5)
+
+
+def test_fastapi_shutdown_timeout_preserves_tail_for_restart(
+    tmp_path, hevc_bytes, monkeypatch, caplog
+):
+    class SyntheticStreams(StreamManager):
+        def __init__(self, config, lock, before_subscribe=None):
+            super().__init__(
+                config,
+                lock,
+                live_source(hevc_bytes),
+                before_subscribe=before_subscribe,
+            )
+
+    monkeypatch.setattr(api_module, "StreamManager", SyntheticStreams)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 32)
+    root = tmp_path / "data"
+    config = tmp_path / ".private/device.json"
+    write_private_json(config.parent / "sdk-profiles.json", {"initialize": "unused-test-profile"})
+    write_private_json(
+        config,
+        {
+            "device": {"did": "MATE-capture", "password": "example"},
+            "bridge": {"adapter": "native-arm64"},
+        },
+    )
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_first_decode(path):
+        calls.append(path)
+        if len(calls) == 1:
+            started.set()
+            assert release.wait(15)
+        validate_decode(path)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_first_decode)
+
+    def build_app():
+        app = create_app(root, TOKEN, config, start_backup=True)
+        app.state.backup.start = lambda: None
+        app.state.backup.close = lambda: None
+        app.state.capture.finalizer.queue.maxsize = 1
+        close = app.state.capture.close
+        app.state.capture.close = lambda: close(timeout=0.5)
+        return app
+
+    caplog.set_level(logging.ERROR, logger=server_capture.__name__)
+    first_app = build_app()
+    with TestClient(first_app):
+        streams = first_app.state.streams
+        viewer = streams.subscribe()
+        get_event(viewer, "init")
+        get_event(viewer, "fragment")
+        get_event(viewer, "fragment")
+        assert started.wait(10)
+
+    assert first_app.state.capture.snapshot()["shutdown_timeout"] is True
+    assert "shutdown timed out" in caplog.text
+    captures = root / "captures"
+    pending = list(captures.glob("*.pending"))
+    assert len(pending) >= 2
+    orphan = captures / ("f" * 32 + ".part")
+    orphan.write_bytes(b"unfinished")
+
+    second_app = build_app()
+    try:
+        with TestClient(second_app):
+            rows = wait_for_rows(root, minimum=2, timeout=20)
+            assert len(rows) >= 2
+            assert all(row["device_id"] == "MATE-capture" for row in rows)
+            assert not orphan.exists()
+            assert not list(captures.glob("f" * 32 + ".mp4"))
+            for row in rows:
+                validate_decode(root / row["path"])
+    finally:
+        release.set()

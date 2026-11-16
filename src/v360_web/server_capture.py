@@ -10,6 +10,8 @@ renamed and indexed as a verified recording.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import os
 import queue
 import secrets
@@ -29,10 +31,59 @@ SEGMENT_SECONDS = 60
 RESERVATION = 8 * 1024**2
 CAPTURE_QUEUE_SIZE = 32
 CAPTURE_FINALIZE_QUEUE_SIZE = 8
+LOGGER = logging.getLogger(__name__)
 
 
 def now_local():
     return datetime.now(ZONE).replace(tzinfo=None)
+
+
+def pending_meta(path):
+    return path.with_suffix(".json")
+
+
+def write_pending_meta(path, key, source, start, last_at, audio, digest):
+    """Persist enough metadata for a later process to validate a sealed segment."""
+    temporary = path.with_name(path.name + ".json.part")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(
+                {
+                    "key": key,
+                    "source": source,
+                    "start": start.isoformat(),
+                    "last_at": last_at.isoformat() if last_at is not None else None,
+                    "audio": bool(audio),
+                    "digest": digest,
+                },
+                output,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, pending_meta(path))
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def read_pending_meta(path):
+    try:
+        value = json.loads(pending_meta(path).read_text(encoding="utf-8"))
+        key = str(value["key"])
+        source = value["source"]
+        digest = value["digest"]
+        if key != path.stem or source not in CAPTURE_SOURCES or not isinstance(digest, str):
+            return None
+        start = datetime.fromisoformat(value["start"])
+        last_at = value.get("last_at")
+        last_at = datetime.fromisoformat(last_at) if last_at else None
+        return (path, key, source, start, last_at, bool(value.get("audio")), digest)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def next_slot(now: datetime):
@@ -135,6 +186,7 @@ class SegmentFinalizer:
     def _finalize(self, job):
         temporary, key, source, start, last_at, audio, digest = job
         start = start or now_local()
+        meta = pending_meta(temporary)
         target = None
         try:
             info = probe(temporary)
@@ -160,17 +212,20 @@ class SegmentFinalizer:
                 target.stat().st_size,
                 digest,
             )
+            meta.unlink(missing_ok=True)
         except (CameraError, OSError) as error:
             if target is not None:
                 target.unlink(missing_ok=True)
             else:
                 temporary.unlink(missing_ok=True)
+            meta.unlink(missing_ok=True)
             self.manager.pause(getattr(error, "code", "capture_validate"))
         except Exception:  # noqa: BLE001 -- a bad segment must not kill later validation
             if target is not None:
                 target.unlink(missing_ok=True)
             else:
                 temporary.unlink(missing_ok=True)
+            meta.unlink(missing_ok=True)
             self.manager.pause("capture_validate")
 
 
@@ -346,8 +401,24 @@ class CaptureSink:
         if not self.fragments:
             temporary.unlink(missing_ok=True)
             return
+        pending = temporary.with_suffix(".pending")
+        try:
+            os.replace(temporary, pending)
+            write_pending_meta(
+                pending,
+                self.key,
+                self.source,
+                self.segment_start or self.created,
+                self.last_at,
+                self.audio,
+                self.digest.hexdigest(),
+            )
+        except OSError:
+            pending.unlink(missing_ok=True)
+            pending_meta(pending).unlink(missing_ok=True)
+            raise
         job = (
-            temporary,
+            pending,
             self.key,
             self.source,
             self.segment_start or self.created,
@@ -356,7 +427,8 @@ class CaptureSink:
             self.digest.hexdigest(),
         )
         if not self.manager.finalizer.submit(job):
-            temporary.unlink(missing_ok=True)
+            pending.unlink(missing_ok=True)
+            pending_meta(pending).unlink(missing_ok=True)
             raise CameraError(
                 "capture_finalize_backlog",
                 "Too many sealed segments are waiting for validation.",
@@ -583,6 +655,11 @@ class CaptureManager:
         self.finalizer = SegmentFinalizer(self)
         self.shutdown_complete = None
         self.shutdown_error = None
+        if self.enabled and self.config_path is not None:
+            try:
+                self.did = Settings.load(self.config_path).did
+            except (CameraError, OSError, ValueError):
+                self.error = "device_not_configured"
         self.recover()
 
     @property
@@ -603,9 +680,28 @@ class CaptureManager:
         directory = self.root / "captures"
         if not directory.is_dir():
             return
+        # Unfinished writers are not products; only sealed .pending files
+        # with matching metadata are safe to resume.
         for path in directory.glob("*.part"):
             if path.is_file() and not path.is_symlink():
                 path.unlink(missing_ok=True)
+        pending = sorted(directory.glob("*.pending"))
+        if pending and self.did is None:
+            LOGGER.warning("Server capture recovery waits for a configured device")
+            return
+        for path in pending:
+            if not path.is_file() or path.is_symlink():
+                continue
+            job = read_pending_meta(path)
+            if job is None:
+                path.unlink(missing_ok=True)
+                pending_meta(path).unlink(missing_ok=True)
+                continue
+            if not self.finalizer.submit(job):
+                LOGGER.warning(
+                    "Server capture recovery left sealed segments for a later startup"
+                )
+                break
 
     def available(self):
         if not self.enabled:
@@ -752,4 +848,12 @@ class CaptureManager:
         with self.guard:
             self.shutdown_complete = bool(drained)
             self.shutdown_error = None if drained else "capture_finalize_shutdown"
+        if not drained:
+            pending = len(list((self.root / "captures").glob("*.pending")))
+            LOGGER.error(
+                "Server capture shutdown timed out after %.1fs; "
+                "%d sealed segment(s) preserved for restart",
+                timeout,
+                pending,
+            )
         return drained
