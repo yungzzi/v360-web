@@ -27,7 +27,7 @@ from .store import CAPTURE_SOURCES, SCHEDULED_SOURCE, WATCH_SOURCE, RecordingSto
 ZONE = ZoneInfo("Asia/Hong_Kong")
 SEGMENT_SECONDS = 60
 RESERVATION = 8 * 1024**2
-CAPTURE_QUEUE_SIZE = 8
+CAPTURE_QUEUE_SIZE = 32
 
 
 def now_local():
@@ -50,6 +50,97 @@ def next_slot(now: datetime):
     steps = int(elapsed // (interval * 60)) + 1
     due = base + timedelta(minutes=steps * interval)
     return due, 30 if 6 <= due.hour < 18 else 15
+
+
+class SegmentFinalizer:
+    """Validate sealed segments without delaying the recording writer."""
+
+    def __init__(self, manager):
+        self.manager = manager
+        self.queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.closed = False
+        self.thread = threading.Thread(
+            target=self._run, name="v360-capture-finalize", daemon=True
+        )
+        self.thread.start()
+
+    def submit(self, job):
+        with self.lock:
+            if self.closed:
+                return False
+            self.queue.put(job)
+            return True
+
+    def flush(self, timeout=15):
+        event = threading.Event()
+        with self.lock:
+            if self.closed:
+                return False
+            self.queue.put(("flush", event))
+        return event.wait(timeout)
+
+    def close(self, wait=True):
+        with self.lock:
+            if not self.closed:
+                self.closed = True
+                self.queue.put(None)
+        if wait:
+            self.thread.join(timeout=60)
+
+    def _run(self):
+        while True:
+            job = self.queue.get()
+            try:
+                if job is None:
+                    break
+                if isinstance(job, tuple) and job and job[0] == "flush":
+                    job[1].set()
+                    continue
+                self._finalize(job)
+            finally:
+                self.queue.task_done()
+
+    def _finalize(self, job):
+        temporary, key, source, start, last_at, audio, digest = job
+        start = start or now_local()
+        target = None
+        try:
+            info = probe(temporary)
+            streams = info.get("streams", [])
+            if not any(stream.get("codec_type") == "video" for stream in streams):
+                raise CameraError("capture_unrecognized", "Captured MP4 has no video stream.")
+            if audio and not any(stream.get("codec_type") == "audio" for stream in streams):
+                raise CameraError("capture_audio", "Captured MP4 lost its audio stream.")
+            validate_decode(temporary)
+            target = temporary.with_suffix(".mp4")
+            os.replace(temporary, target)
+            target.chmod(0o600)
+            duration = max(
+                1,
+                round(((last_at or start or now_local()) - start).total_seconds()),
+            )
+            self.manager.register(
+                key,
+                source,
+                (start or now_local()).isoformat(),
+                duration,
+                "captures/" + target.name,
+                target.stat().st_size,
+                digest,
+            )
+        except (CameraError, OSError) as error:
+            if target is not None:
+                target.unlink(missing_ok=True)
+            else:
+                temporary.unlink(missing_ok=True)
+            self.manager.pause(getattr(error, "code", "capture_validate"))
+        except Exception:  # noqa: BLE001 -- a bad segment must not kill later validation
+            if target is not None:
+                target.unlink(missing_ok=True)
+            else:
+                temporary.unlink(missing_ok=True)
+            self.manager.pause("capture_validate")
 
 
 class CaptureSink:
@@ -81,6 +172,7 @@ class CaptureSink:
         self.done = False
         self.error = None
         self.owner = None
+        self.finalizer = SegmentFinalizer(manager)
         self.guard = threading.RLock()
 
     @property
@@ -138,6 +230,7 @@ class CaptureSink:
             self._publish(event, value, at, mono)
             finished = self.done
         if finished:
+            self.finalizer.close(wait=False)
             self.manager.note_done(self.owner or self)
 
     def _publish(self, event, value, at, mono):
@@ -224,41 +317,18 @@ class CaptureSink:
         if not self.fragments:
             temporary.unlink(missing_ok=True)
             return
-        try:
-            info = probe(temporary)
-            streams = info.get("streams", [])
-            if not any(stream.get("codec_type") == "video" for stream in streams):
-                raise CameraError("capture_unrecognized", "Captured MP4 has no video stream.")
-            if self.audio and not any(
-                stream.get("codec_type") == "audio" for stream in streams
-            ):
-                raise CameraError("capture_audio", "Captured MP4 lost its audio stream.")
-            validate_decode(temporary)
-        except (CameraError, OSError):
-            temporary.unlink(missing_ok=True)
-            raise
-        target = temporary.with_suffix(".mp4")
-        os.replace(temporary, target)
-        target.chmod(0o600)
-        self.path = target
-        duration = max(
-            1,
-            round(
-                (
-                    (self.last_at or self.segment_start or now_local()) - self.segment_start
-                ).total_seconds()
-            ),
-        )
-        self.manager.register(
+        job = (
+            temporary,
             self.key,
             self.source,
-            (self.segment_start or self.created).isoformat(),
-            duration,
-            "captures/" + target.name,
-            target.stat().st_size,
+            self.segment_start or self.created,
+            self.last_at,
+            self.audio,
             self.digest.hexdigest(),
         )
-        self.path = None
+        if not self.finalizer.submit(job):
+            temporary.unlink(missing_ok=True)
+            self.manager.pause("capture_closed")
         self.key = None
         self.written = 0
         self.fragments = 0
@@ -268,6 +338,10 @@ class CaptureSink:
         with self.guard:
             self._close(reason)
             finished = self.done
+            if finished:
+                self.finalizer.close(wait=False)
+        if wait:
+            self.finalizer.close(wait=True)
         if finished:
             self.manager.note_done(self.owner or self)
 
@@ -303,6 +377,7 @@ class CaptureSink:
             self.path = None
         self.error = code
         self.done = True
+        self.finalizer.close(wait=False)
         self.manager.pause(code)
 
 
@@ -317,6 +392,9 @@ class AsyncCaptureSink:
         self.finished = threading.Event()
         self.overflow = False
         self.flushes = []
+        self.time_guard = threading.Lock()
+        self.first_video = None
+        self.latest_video = None
         self.worker = threading.Thread(target=self._run, name="v360-capture-writer", daemon=True)
         self.worker.start()
 
@@ -345,7 +423,11 @@ class AsyncCaptureSink:
         return self.writer.done or self.finished.is_set()
 
     def note_video(self, at, mono):
-        self._put(("video", at, mono))
+        # Coalesce per-frame timestamps into one latest value for the writer.
+        with self.time_guard:
+            if self.first_video is None:
+                self.first_video = (at, mono)
+            self.latest_video = (at, mono)
 
     def publish(self, event, value, at, mono):
         self._put(("event", event, value, at, mono))
@@ -359,6 +441,15 @@ class AsyncCaptureSink:
     def abort(self, code):
         self._put(("abort", code))
 
+    def _sync_video(self):
+        with self.time_guard:
+            first = self.first_video
+            latest = self.latest_video
+        if first is not None and self.writer.started_at is None:
+            self.writer.note_video(*first)
+        if latest is not None:
+            self.writer.note_video(*latest)
+
     def flush(self, timeout=15):
         event = threading.Event()
         self.flushes.append(event)
@@ -366,11 +457,13 @@ class AsyncCaptureSink:
             event.set()
             return
         event.wait(timeout)
+        self.writer.finalizer.flush(timeout)
 
     def close(self, reason=None, wait=True):
         self._put(("close", reason), control=True)
         if wait:
             self.worker.join(timeout=60)
+            self.writer.finalizer.close(wait=True)
 
     def _put(self, item, *, control=False):
         if self.done:
@@ -405,7 +498,8 @@ class AsyncCaptureSink:
                     self.writer.abort("capture_backlog")
                     break
                 if command == "close":
-                    self.writer.close(item[1] if len(item) > 1 else None)
+                    self._sync_video()
+                    self.writer.close(item[1] if len(item) > 1 else None, wait=False)
                     break
                 if command == "abort":
                     self.writer.abort(item[1])
@@ -414,10 +508,10 @@ class AsyncCaptureSink:
                     item[1].set()
                     continue
                 if command == "event":
+                    self._sync_video()
                     self.writer.publish(item[1], item[2], item[3], item[4])
-                elif command == "video":
-                    self.writer.note_video(item[1], item[2])
                 elif command == "handoff":
+                    self._sync_video()
                     self.writer.handoff(item[1], item[2], item[3])
                 elif command == "stop":
                     self.writer.request_stop()

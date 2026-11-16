@@ -366,14 +366,21 @@ class StreamManager:
                 self.initialization = None
                 self.state, self.error = "starting", None
                 self.frames = self.fragments = self.audio_frames = 0
-            if lens == 0 and self.recorder is None and self.capture:
+            if lens == 0 and self.capture and (
+                self.recorder is None or self.recorder.done
+            ):
                 try:
                     self.recorder = self.capture.new_watch()
                     if self.recorder is not None and self.initialization is not None:
                         seed = (self.recorder, self.initialization)
                 except Exception:  # noqa: BLE001 -- recording must never block viewing
                     self.recorder = None
-            elif lens == 0 and self.recorder is not None and self.recorder.source != WATCH_SOURCE:
+            elif (
+                lens == 0
+                and self.recorder is not None
+                and not self.recorder.done
+                and self.recorder.source != WATCH_SOURCE
+            ):
                 handoff = self.recorder
             viewer = Subscriber()
             self.viewers.add(viewer)

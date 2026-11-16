@@ -105,6 +105,36 @@ def hevc_bytes(tmp_path_factory):
     return target.read_bytes()
 
 
+@pytest.fixture(scope="module")
+def hevc_frame(tmp_path_factory):
+    target = tmp_path_factory.mktemp("server-capture-frame") / "frame.hevc"
+    subprocess.run(
+        [
+            find_tool("ffmpeg"),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=160x96:r=15:d=0.1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libx265",
+            "-threads",
+            "1",
+            "-x265-params",
+            "pools=1:frame-threads=1:keyint=15:log-level=error",
+            "-an",
+            str(target),
+        ],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    )
+    return target.read_bytes()
+
+
 @pytest.fixture
 def manager(tmp_path, monkeypatch):
     monkeypatch.setattr(
@@ -325,6 +355,15 @@ def live_source(hevc):
         while not stop.is_set():
             yield hevc
             stop.wait(0.05)
+
+    return source
+
+
+def frame_source(frame, rate=15):
+    def source(config, stop):
+        while not stop.is_set():
+            yield frame
+            stop.wait(1 / rate)
 
     return source
 
@@ -577,17 +616,18 @@ def test_capture_queue_overflow_pauses_without_stalling_live(manager, hevc_bytes
     capture, config = manager
     streams = StreamManager(config, threading.Lock(), live_source(hevc_bytes), capture=capture)
     capture.attach(streams)
-    validation_started = threading.Event()
+    blocked = threading.Event()
     release = threading.Event()
+    original_prepare = capture.prepare
 
-    def slow_decode(path):
-        validation_started.set()
+    def blocked_prepare(additional, protected=None):
+        blocked.set()
         assert release.wait(10)
-        validate_decode(path)
+        return original_prepare(additional, protected=protected)
 
-    monkeypatch.setattr(server_capture, "validate_decode", slow_decode)
+    monkeypatch.setattr(capture, "prepare", blocked_prepare)
     monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
-    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 16)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 2)
     received = []
     collecting = threading.Event()
 
@@ -605,13 +645,14 @@ def test_capture_queue_overflow_pauses_without_stalling_live(manager, hevc_bytes
         sink = streams.recorder
         collector = threading.Thread(target=collect, name="capture-viewer-drain", daemon=True)
         collector.start()
-        assert validation_started.wait(10)
+        assert blocked.wait(10)
         deadline = time.monotonic() + 5
         while not sink.overflow and time.monotonic() < deadline:
             time.sleep(0.05)
         assert sink.overflow is True
-        assert len(received) >= 6
+        assert len(received) >= 4
         assert streams.snapshot()["recording"] is True
+        assert streams.thread.is_alive()
     finally:
         collecting.set()
         if collector is not None:
@@ -654,3 +695,138 @@ def test_slow_finalization_does_not_hold_live_thread(manager, hevc_bytes, monkey
         if viewer is not None:
             streams.unsubscribe(viewer)
         streams.close()
+
+
+def test_normal_frame_rate_slow_validation_continues_next_segment(
+    manager, hevc_frame, monkeypatch
+):
+    capture, config = manager
+    streams = StreamManager(
+        config, threading.Lock(), frame_source(hevc_frame), capture=capture
+    )
+    capture.attach(streams)
+    validation_started = threading.Event()
+    release = threading.Event()
+
+    def slow_decode(path):
+        validation_started.set()
+        assert release.wait(15)
+        validate_decode(path)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_decode)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 1)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 8)
+    received = []
+    collecting = threading.Event()
+
+    def collect():
+        while not collecting.is_set():
+            try:
+                kind, _value = viewer.messages.get(timeout=0.2)
+                received.append(kind)
+            except queue.Empty:
+                pass
+
+    viewer = None
+    collector = None
+    try:
+        viewer = streams.subscribe()
+        sink = streams.recorder
+        get_event(viewer, "init")
+        collector = threading.Thread(target=collect, name="capture-frame-drain", daemon=True)
+        collector.start()
+        assert validation_started.wait(15)
+        frames_before = streams.snapshot()["frames"]
+        deadline = time.monotonic() + 8
+        while len(list((capture.root / "captures").glob("*.part"))) < 2:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        assert len(list((capture.root / "captures").glob("*.part"))) >= 2
+        deadline = time.monotonic() + 5
+        while streams.snapshot()["frames"] - frames_before < 15:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        assert streams.snapshot()["frames"] - frames_before >= 15
+        assert sink.overflow is False
+        assert streams.snapshot()["recording"] is True
+        assert streams.thread.is_alive()
+        assert len([kind for kind in received if kind == "fragment"]) >= 2
+    finally:
+        collecting.set()
+        if collector is not None:
+            collector.join(timeout=2)
+        release.set()
+        if viewer is not None:
+            streams.unsubscribe(viewer)
+        streams.thread.join(timeout=10)
+        streams.close()
+    rows = wait_for_rows(capture.root, minimum=2, timeout=15)
+    assert len(rows) >= 2
+    for row in rows:
+        validate_decode(capture.root / row["path"])
+
+
+def test_reopen_live_while_old_segment_finishing_still_records(
+    manager, hevc_bytes, monkeypatch
+):
+    capture, config = manager
+    streams = StreamManager(config, threading.Lock(), live_source(hevc_bytes), capture=capture)
+    capture.attach(streams)
+    validation_started = threading.Event()
+    release = threading.Event()
+    calls = []
+    calls_guard = threading.Lock()
+
+    def slow_first_decode(path):
+        with calls_guard:
+            calls.append(path)
+            first = len(calls) == 1
+        if first:
+            validation_started.set()
+            assert release.wait(15)
+        validate_decode(path)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_first_decode)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 32)
+    first_viewer = None
+    second_viewer = None
+    try:
+        first_viewer = streams.subscribe()
+        old_sink = streams.recorder
+        assert old_sink is not None
+        get_event(first_viewer, "init")
+        assert validation_started.wait(10)
+        streams.unsubscribe(first_viewer)
+        streams.thread.join(timeout=8)
+        assert not streams.thread.is_alive()
+        deadline = time.monotonic() + 5
+        while not old_sink.done and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert old_sink.done and old_sink.writer.finalizer.thread.is_alive()
+
+        second_viewer = streams.subscribe()
+        new_sink = streams.recorder
+        assert new_sink is not None and new_sink is not old_sink
+        get_event(second_viewer, "init")
+        get_event(second_viewer, "fragment")
+        get_event(second_viewer, "fragment")
+        streams.unsubscribe(second_viewer)
+        streams.thread.join(timeout=8)
+        assert not streams.thread.is_alive()
+        rows = wait_for_rows(capture.root, minimum=1, timeout=10)
+        assert rows
+        assert old_sink.writer.finalizer.thread.is_alive()
+    finally:
+        release.set()
+        if first_viewer is not None:
+            streams.unsubscribe(first_viewer)
+        if second_viewer is not None:
+            streams.unsubscribe(second_viewer)
+        streams.close()
+    rows = wait_for_rows(capture.root, minimum=2, timeout=15)
+    assert len(rows) >= 2
+    for row in rows:
+        validate_decode(capture.root / row["path"])
