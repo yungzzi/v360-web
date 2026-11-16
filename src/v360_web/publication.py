@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from .store import CAPTURE_SOURCES, RecordingStore
+from .store import CAPTURE_SOURCES, RecordingStore, record_source
 
 ZONE = ZoneInfo("Asia/Hong_Kong")
 
@@ -55,7 +55,7 @@ class Publication(RecordingStore):
 
     @staticmethod
     def describe(item, row=None, now=None):
-        if item.get("source") in CAPTURE_SOURCES:
+        if record_source(item) in CAPTURE_SOURCES:
             return {
                 "batch_start": item["start_local"],
                 "batch_end": item["start_local"],
@@ -76,7 +76,7 @@ class Publication(RecordingStore):
         return bool(item) and (not self.enabled() or self.info(item)["stopped_reason"] is None)
 
     def published(self, item):
-        if item and item.get("source") in CAPTURE_SOURCES:
+        if record_source(item) in CAPTURE_SOURCES:
             return True
         return not self.enabled() or self.info(item)["released"]
 

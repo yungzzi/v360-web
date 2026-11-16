@@ -17,6 +17,16 @@ SCHEDULED_SOURCE = "scheduled"
 CAPTURE_SOURCES = frozenset({WATCH_SOURCE, SCHEDULED_SOURCE})
 
 
+def record_source(item):
+    """Read a recording source from either a dict or a sqlite3.Row."""
+    if not item:
+        return None
+    try:
+        return item["source"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 class RecordingStore:
     def __init__(self, root: Path):
         self.root = root.resolve()

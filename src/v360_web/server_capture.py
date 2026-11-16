@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import queue
 import secrets
 import threading
 import time
@@ -26,6 +27,7 @@ from .store import CAPTURE_SOURCES, SCHEDULED_SOURCE, WATCH_SOURCE, RecordingSto
 ZONE = ZoneInfo("Asia/Hong_Kong")
 SEGMENT_SECONDS = 60
 RESERVATION = 8 * 1024**2
+CAPTURE_QUEUE_SIZE = 8
 
 
 def now_local():
@@ -78,6 +80,7 @@ class CaptureSink:
         self.stop_requested = None
         self.done = False
         self.error = None
+        self.owner = None
         self.guard = threading.RLock()
 
     @property
@@ -135,7 +138,7 @@ class CaptureSink:
             self._publish(event, value, at, mono)
             finished = self.done
         if finished:
-            self.manager.note_done(self)
+            self.manager.note_done(self.owner or self)
 
     def _publish(self, event, value, at, mono):
         if self.done:
@@ -261,12 +264,12 @@ class CaptureSink:
         self.fragments = 0
         self.digest = None
 
-    def close(self, reason=None):
+    def close(self, reason=None, wait=True):
         with self.guard:
             self._close(reason)
             finished = self.done
         if finished:
-            self.manager.note_done(self)
+            self.manager.note_done(self.owner or self)
 
     def _close(self, reason=None):
         if self.done:
@@ -286,7 +289,7 @@ class CaptureSink:
     def abort(self, code):
         with self.guard:
             self._fail(code)
-        self.manager.note_done(self)
+        self.manager.note_done(self.owner or self)
 
     def _fail(self, code):
         if self.path is not None:
@@ -301,6 +304,131 @@ class CaptureSink:
         self.error = code
         self.done = True
         self.manager.pause(code)
+
+
+class AsyncCaptureSink:
+    """Bounded hand-off from live output threads to the recording writer."""
+
+    def __init__(self, manager, source, did, duration=None):
+        self.writer = CaptureSink(manager, source, did, duration=duration)
+        self.writer.owner = self
+        self.manager = manager
+        self.queue = queue.Queue(maxsize=CAPTURE_QUEUE_SIZE)
+        self.finished = threading.Event()
+        self.overflow = False
+        self.flushes = []
+        self.worker = threading.Thread(target=self._run, name="v360-capture-writer", daemon=True)
+        self.worker.start()
+
+    @property
+    def source(self):
+        return self.writer.source
+
+    @property
+    def source_now(self):
+        return self.writer.source_now
+
+    @property
+    def handoff_source(self):
+        return self.writer.handoff_source
+
+    @property
+    def fragments(self):
+        return self.writer.fragments
+
+    @property
+    def error(self):
+        return self.writer.error
+
+    @property
+    def done(self):
+        return self.writer.done or self.finished.is_set()
+
+    def note_video(self, at, mono):
+        self._put(("video", at, mono))
+
+    def publish(self, event, value, at, mono):
+        self._put(("event", event, value, at, mono))
+
+    def handoff(self, source, at, mono):
+        self._put(("handoff", source, at, mono))
+
+    def request_stop(self):
+        self._put(("stop",))
+
+    def abort(self, code):
+        self._put(("abort", code))
+
+    def flush(self, timeout=15):
+        event = threading.Event()
+        self.flushes.append(event)
+        if not self._put(("flush", event), control=True):
+            event.set()
+            return
+        event.wait(timeout)
+
+    def close(self, reason=None, wait=True):
+        self._put(("close", reason), control=True)
+        if wait:
+            self.worker.join(timeout=60)
+
+    def _put(self, item, *, control=False):
+        if self.done:
+            return False
+        try:
+            self.queue.put_nowait(item)
+            return True
+        except queue.Full:
+            # Never stall live delivery: drop capture work and stop this session.
+            self.overflow = True
+            if control:
+                try:
+                    self.queue.get_nowait()
+                    self.queue.put_nowait(item)
+                    return True
+                except (queue.Empty, queue.Full):
+                    pass
+            return False
+
+    def _run(self):
+        try:
+            while True:
+                try:
+                    item = self.queue.get(timeout=0.2)
+                except queue.Empty:
+                    if self.overflow:
+                        self.writer.abort("capture_backlog")
+                        break
+                    continue
+                command = item[0]
+                if self.overflow:
+                    self.writer.abort("capture_backlog")
+                    break
+                if command == "close":
+                    self.writer.close(item[1] if len(item) > 1 else None)
+                    break
+                if command == "abort":
+                    self.writer.abort(item[1])
+                    break
+                if command == "flush":
+                    item[1].set()
+                    continue
+                if command == "event":
+                    self.writer.publish(item[1], item[2], item[3], item[4])
+                elif command == "video":
+                    self.writer.note_video(item[1], item[2])
+                elif command == "handoff":
+                    self.writer.handoff(item[1], item[2], item[3])
+                elif command == "stop":
+                    self.writer.request_stop()
+                if self.writer.done:
+                    break
+        finally:
+            for event in self.flushes:
+                event.set()
+            if not self.writer.done:
+                self.writer.abort("capture_backlog" if self.overflow else "capture_closed")
+            self.finished.set()
 
 
 class CaptureManager:
@@ -378,7 +506,7 @@ class CaptureManager:
         with self.guard:
             if self.active is not None and not self.active.done:
                 return None
-            sink = CaptureSink(self, WATCH_SOURCE, self.did)
+            sink = AsyncCaptureSink(self, WATCH_SOURCE, self.did)
             self.active = sink
             return sink
 
@@ -388,7 +516,7 @@ class CaptureManager:
         with self.guard:
             if self.active is not None and not self.active.done:
                 return None
-            sink = CaptureSink(self, SCHEDULED_SOURCE, self.did, duration=duration)
+            sink = AsyncCaptureSink(self, SCHEDULED_SOURCE, self.did, duration=duration)
             self.active = sink
             return sink
 

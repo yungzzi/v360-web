@@ -1,4 +1,5 @@
 import io
+import queue
 import subprocess
 import threading
 import time
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from v360_web import maintenance, playback, server_capture, storage
 from v360_web.api import create_app
+from v360_web.backup_policy import BackupPolicy
 from v360_web.config import write_private_json
 from v360_web.errors import CameraError
 from v360_web.media import find_tool, probe, validate_decode
@@ -164,6 +166,7 @@ def test_shared_output_creates_independent_playable_segments(manager, fragments,
     sink = capture.new_watch()
     init, pieces = fragments
     feed(sink, init, pieces)
+    sink.flush()
     sink.close()
     rows = [row for row in RecordingStore(capture.root).list() if row["source"] == WATCH_SOURCE]
     assert len(rows) >= 2
@@ -188,11 +191,13 @@ def test_handoff_splits_source_without_duplicating_fragments(manager, fragments,
     sink = capture.new_scheduled(30)
     init, pieces = fragments
     feed(sink, init, pieces[:1])
+    sink.flush()
     sink.handoff(WATCH_SOURCE, datetime(2026, 11, 16, 6, 0, 10), 1100)
     for index, piece in enumerate(pieces[1:], 2):
         wall = datetime(2026, 11, 16, 6, 0, index)
         sink.note_video(wall, 1000 + index)
         sink.publish("fragment", piece, wall, 1000 + index)
+    sink.flush()
     sink.close()
     rows = RecordingStore(capture.root).list()
     assert {row["source"] for row in rows} == {SCHEDULED_SOURCE, WATCH_SOURCE}
@@ -207,6 +212,7 @@ def test_unfinished_capture_is_not_indexed(manager, fragments):
     init, _pieces = fragments
     sink = capture.new_watch()
     sink.publish("init", ("video/mp4", init), datetime(2026, 11, 16, 6), 1000)
+    sink.flush()
     sink.close()
     assert RecordingStore(capture.root).list() == []
     assert not list((capture.root / "captures").glob("*.part"))
@@ -273,6 +279,7 @@ def test_storage_failure_pauses_capture_without_raising(manager, fragments, monk
     wall = datetime(2026, 11, 16, 6)
     sink.note_video(wall, 1000)
     sink.publish("fragment", pieces[0], wall, 1000)
+    sink.flush()
     assert capture.snapshot()["paused"] is True
     assert capture.snapshot()["error"] == "storage_limit"
     assert RecordingStore(capture.root).list() == []
@@ -328,6 +335,16 @@ def get_event(viewer, event):
     return value
 
 
+def wait_for_rows(root, minimum=1, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = RecordingStore(root).list()
+        if len(rows) >= minimum:
+            return rows
+        time.sleep(0.05)
+    return RecordingStore(root).list()
+
+
 def test_multiple_viewers_share_one_recorder(manager, hevc_bytes):
     capture, config = manager
     streams = StreamManager(config, threading.Lock(), live_source(hevc_bytes), capture=capture)
@@ -347,7 +364,7 @@ def test_multiple_viewers_share_one_recorder(manager, hevc_bytes):
         streams.unsubscribe(second)
         streams.thread.join(timeout=8)
         assert not streams.thread.is_alive()
-        rows = RecordingStore(capture.root).list()
+        rows = wait_for_rows(capture.root)
         assert len(rows) == 1 and rows[0]["source"] == WATCH_SOURCE
         validate_decode(capture.root / rows[0]["path"])
     finally:
@@ -375,7 +392,8 @@ def test_real_viewer_handoff_continues_same_session(manager, hevc_bytes):
         assert sink.source == WATCH_SOURCE and streams.recorder is sink
         streams.unsubscribe(observer)
         streams.thread.join(timeout=8)
-        sources = {row["source"] for row in RecordingStore(capture.root).list()}
+        rows = wait_for_rows(capture.root)
+        sources = {row["source"] for row in rows}
         assert SCHEDULED_SOURCE in sources
     finally:
         streams.close()
@@ -399,7 +417,7 @@ def test_secondary_view_releases_capture_session(manager, hevc_bytes):
             time.sleep(0.05)
         streams.thread.join(timeout=8)
         assert not streams.thread.is_alive() and not streams.camera_lock.locked()
-        assert RecordingStore(capture.root).list()
+        assert wait_for_rows(capture.root)
     finally:
         streams.close()
 
@@ -418,6 +436,9 @@ def test_capture_failure_does_not_stop_live(manager, hevc_bytes, monkeypatch):
         get_event(viewer, "init")
         assert get_event(viewer, "fragment")
         assert streams.thread.is_alive() and not streams.error
+        deadline = time.monotonic() + 5
+        while not capture.snapshot()["paused"] and time.monotonic() < deadline:
+            time.sleep(0.05)
         assert capture.snapshot()["paused"] is True
         streams.unsubscribe(viewer)
         streams.thread.join(timeout=8)
@@ -432,3 +453,204 @@ def test_existing_discovery_rows_remain_sd_source(manager):
         "MATE-capture", 0, [RecordingEvent(datetime(2026, 11, 16, 6), 0, 2, 1, 1)]
     )
     assert store.get(ids[0])["source"] == "sd"
+
+
+def test_status_with_pending_sd_rows_uses_sqlite_rows(manager):
+    capture, config = manager
+    store = RecordingStore(capture.root)
+    next_hour = server_capture.now_local().replace(minute=0, second=0, microsecond=0)
+    store.discover(
+        "MATE-capture", 0, [RecordingEvent(next_hour, 0, 2, 1, 1)]
+    )
+    with TestClient(create_app(capture.root, TOKEN, config)) as client:
+        response = client.get("/api/status", headers=HEADERS)
+        assert response.status_code == 200
+        assert response.json()["backup"]["archive"]["pending"] == 1
+
+
+def test_capture_cleanup_counts_combined_budget(manager, monkeypatch):
+    capture, _ = manager
+    store = RecordingStore(capture.root)
+    directory = capture.root / "captures"
+    directory.mkdir(parents=True)
+    capture_file = directory / ("e" * 32 + ".mp4")
+    capture_file.write_bytes(b"x" * 30)
+    store.add_capture(
+        "MATE-capture", "e" * 32, WATCH_SOURCE, "2026-01-01T00:00:00", 1,
+        "captures/" + capture_file.name, 30, "0" * 64,
+    )
+    with store.connection() as db:
+        db.execute(
+            "UPDATE recordings SET saved_at='2026-01-01T00:00:00+00:00' WHERE id=?",
+            ("e" * 32,),
+        )
+    media = capture.root / "media" / ("f" * 32 + ".media")
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(b"x" * 60)
+    store.discover("MATE-capture", 0, [RecordingEvent(datetime(2026, 1, 2), 0, 2, 1, 1)])
+    with store.connection() as db:
+        db.execute(
+            "UPDATE recordings SET path=?,bytes=?,state='verified',saved_at=? "
+            "WHERE device_id='MATE-capture' AND id<>?",
+            ("media/" + media.name, 60, "2026-01-02T00:00:00+00:00", "e" * 32),
+        )
+    BackupPolicy(capture.root).write("policy", {"mode": "server", "enabled": True})
+    monkeypatch.setattr(storage, "SERVER_TOTAL_LIMIT", 100)
+    monkeypatch.setattr(storage, "CAPTURE_LIMIT", 1000)
+
+    removed = maintenance.cleanup_captures(capture.root, 20)
+    assert removed["ids"] == ["e" * 32]
+    assert not capture_file.exists()
+    assert media.is_file()
+    assert store.get("e" * 32)["state"] == "evicted"
+
+
+def test_sd_cleanup_reclaims_captures_before_archive(manager, monkeypatch):
+    capture, _ = manager
+    store = RecordingStore(capture.root)
+    directory = capture.root / "captures"
+    directory.mkdir(parents=True)
+    capture_file = directory / ("0" * 32 + ".mp4")
+    capture_file.write_bytes(b"x" * 30)
+    store.add_capture(
+        "MATE-capture", "0" * 32, SCHEDULED_SOURCE, "2026-01-01T00:00:00", 1,
+        "captures/" + capture_file.name, 30, "0" * 64,
+    )
+    with store.connection() as db:
+        db.execute(
+            "UPDATE recordings SET saved_at='2026-01-01T00:00:00+00:00' WHERE id=?",
+            ("0" * 32,),
+        )
+    media = capture.root / "media" / ("1" * 32 + ".media")
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(b"x" * 60)
+    sd_id = store.discover(
+        "MATE-capture", 0, [RecordingEvent(datetime(2026, 1, 2), 0, 2, 1, 1)]
+    )[0]
+    with store.connection() as db:
+        db.execute(
+            "UPDATE recordings SET id=?,path=?,bytes=?,state='verified',saved_at=? WHERE id=?",
+            ("1" * 32, "media/" + media.name, 60, server_capture.now_local().isoformat(), sd_id),
+        )
+    BackupPolicy(capture.root).write("policy", {"mode": "server", "enabled": True})
+    monkeypatch.setattr(storage, "SERVER_TOTAL_LIMIT", 100)
+    monkeypatch.setattr(storage, "CAPTURE_LIMIT", 1000)
+
+    result = maintenance.cleanup(capture.root, 20)
+    assert result["removed_recordings"] == 0
+    assert store.get("0" * 32)["state"] == "evicted"
+    assert store.get("1" * 32)["state"] == "verified"
+    assert media.is_file()
+
+
+def test_slow_capture_validation_does_not_delay_viewers(manager, hevc_bytes, monkeypatch):
+    capture, config = manager
+    streams = StreamManager(config, threading.Lock(), live_source(hevc_bytes), capture=capture)
+    capture.attach(streams)
+    validation_started = threading.Event()
+    release = threading.Event()
+
+    def slow_decode(path):
+        validation_started.set()
+        assert release.wait(10)
+        validate_decode(path)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_decode)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 16)
+    try:
+        viewer = streams.subscribe()
+        get_event(viewer, "init")
+        assert validation_started.wait(10)
+        started = time.monotonic()
+        received = [get_event(viewer, "fragment") for _ in range(4)]
+        assert len(received) == 4 and time.monotonic() - started < 5
+        assert streams.thread.is_alive() and streams.snapshot()["recording"] is True
+    finally:
+        release.set()
+        streams.unsubscribe(viewer)
+        streams.thread.join(timeout=10)
+        streams.close()
+
+
+def test_capture_queue_overflow_pauses_without_stalling_live(manager, hevc_bytes, monkeypatch):
+    capture, config = manager
+    streams = StreamManager(config, threading.Lock(), live_source(hevc_bytes), capture=capture)
+    capture.attach(streams)
+    validation_started = threading.Event()
+    release = threading.Event()
+
+    def slow_decode(path):
+        validation_started.set()
+        assert release.wait(10)
+        validate_decode(path)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_decode)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 16)
+    received = []
+    collecting = threading.Event()
+
+    def collect():
+        while not collecting.is_set():
+            try:
+                kind, _value = viewer.messages.get(timeout=0.2)
+                received.append(kind)
+            except queue.Empty:
+                pass
+
+    collector = None
+    try:
+        viewer = streams.subscribe()
+        sink = streams.recorder
+        collector = threading.Thread(target=collect, name="capture-viewer-drain", daemon=True)
+        collector.start()
+        assert validation_started.wait(10)
+        deadline = time.monotonic() + 5
+        while not sink.overflow and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert sink.overflow is True
+        assert len(received) >= 6
+        assert streams.snapshot()["recording"] is True
+    finally:
+        collecting.set()
+        if collector is not None:
+            collector.join(timeout=2)
+        release.set()
+        streams.unsubscribe(viewer)
+        streams.thread.join(timeout=10)
+        streams.close()
+    deadline = time.monotonic() + 5
+    while capture.snapshot()["paused"] is False and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert capture.snapshot()["error"] == "capture_backlog"
+
+
+def test_slow_finalization_does_not_hold_live_thread(manager, hevc_bytes, monkeypatch):
+    capture, config = manager
+    streams = StreamManager(config, threading.Lock(), live_source(hevc_bytes), capture=capture)
+    capture.attach(streams)
+    validation_started = threading.Event()
+    release = threading.Event()
+
+    def slow_decode(path):
+        validation_started.set()
+        assert release.wait(10)
+        validate_decode(path)
+
+    monkeypatch.setattr(server_capture, "validate_decode", slow_decode)
+    monkeypatch.setattr(server_capture, "SEGMENT_SECONDS", 0)
+    monkeypatch.setattr(server_capture, "CAPTURE_QUEUE_SIZE", 16)
+    viewer = None
+    try:
+        viewer = streams.subscribe()
+        get_event(viewer, "init")
+        assert validation_started.wait(10)
+        streams.unsubscribe(viewer)
+        streams.thread.join(timeout=5)
+        assert not streams.thread.is_alive()
+    finally:
+        release.set()
+        if viewer is not None:
+            streams.unsubscribe(viewer)
+        streams.close()

@@ -152,9 +152,10 @@ def cleanup(root, additional=0, kind="archive", protected=None):
         return {"removed_recordings": len(removed), "removed_cache_bytes": removed_cache}
 
 
-def cleanup_captures(root, additional=0, protected=None):
+def cleanup_captures(root, additional=0, protected=None, *, admit=True):
     """Reclaim only old, unused server captures; never touch SD-archive originals."""
     with GUARD:
+        config = BackupPolicy(root)
         store = RecordingStore(root)
         rows = sorted(
             (
@@ -165,11 +166,17 @@ def cleanup_captures(root, additional=0, protected=None):
             key=lambda row: row["saved_at"] or row["updated_at"],
         )
         used = storage.usage(root / "captures")
-        required = max(
+        combined = sum(
+            storage.usage(root / folder) for folder in ("media", "previews", "live", "captures")
+        )
+        required_values = [
             0,
             used + additional - storage.CAPTURE_LIMIT,
             storage.FREE_RESERVE + additional - storage.shutil.disk_usage(root).free,
-        )
+        ]
+        if config.policy()["mode"] == "server":
+            required_values.append(combined + additional - storage.SERVER_TOTAL_LIMIT)
+        required = max(required_values)
         removed = []
         for row in rows:
             if required <= 0:
@@ -190,10 +197,12 @@ def cleanup_captures(root, additional=0, protected=None):
             size = path.stat().st_size
             path.unlink()
             used -= size
+            combined -= size
             required -= size
             store.update(key, "evicted", path=None, error=None)
             removed.append(key)
-        storage.admit(root, additional, "capture")
+        if admit:
+            storage.admit(root, additional, "capture")
         return {"removed_recordings": len(removed), "ids": removed}
 
 
@@ -217,6 +226,8 @@ def cleanup_combined(root, store, rows, policy, additional, protected):
     limit = storage.SERVER_TOTAL_LIMIT
     if additional > limit:
         raise CameraError("storage_limit", "Incoming file exceeds combined budget.")
+    # Server captures share this budget but are lower priority than SD originals.
+    cleanup_captures(root, additional, admit=False)
     used = sum(
         storage.usage(root / folder) for folder in ("media", "previews", "live", "captures")
     )

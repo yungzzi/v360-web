@@ -352,6 +352,7 @@ class StreamManager:
                 # A capture-only session has no real audience; release it for viewing.
                 if not self.viewers and self.recorder is not None:
                     self.recorder.request_stop()
+                    self.stop.set()
                     self.state = "stopping"
                     raise CameraError(
                         "camera_busy", "A fallback recording is finishing before this view."
@@ -420,7 +421,12 @@ class StreamManager:
         with self.guard:
             if self.recorder is sink:
                 self.recorder = None
-            if not self.viewers and self.thread and self.thread.is_alive():
+            if (
+                not self.viewers
+                and not self.stop.is_set()
+                and self.thread
+                and self.thread.is_alive()
+            ):
                 self.stop.set()
                 self.state = "stopping"
 
@@ -436,10 +442,11 @@ class StreamManager:
                     recorder.source == WATCH_SOURCE or recorder.handoff_source == WATCH_SOURCE
                 ):
                     recorder.request_stop()
-                else:
-                    self.stop.set()
-                    if self.thread and self.thread.is_alive():
-                        self.state = "stopping"
+                # Stop delivering to viewers immediately; the recorder drains its
+                # bounded queue and finalizes the remaining fragments in background.
+                self.stop.set()
+                if self.thread and self.thread.is_alive():
+                    self.state = "stopping"
 
     def move(self, identity, direction):
         with self.guard:
@@ -628,7 +635,7 @@ class StreamManager:
                 self.encoder_pid = None
             recorder = self.recorder
             if recorder is not None and not recorder.done:
-                recorder.close("stream_end")
+                recorder.close("stream_end", wait=False)
             with self.guard:
                 self.state = "failed" if self.error else "stopped"
                 for viewer in self.viewers:
