@@ -37,6 +37,7 @@ from . import (
     maintenance,
     playback,
     progress,
+    server_capture,
     service,
     storage,
 )
@@ -137,12 +138,20 @@ def create_app(
         except (ValueError, AttributeError):
             return False
 
+    capture = server_capture.CaptureManager(
+        root, config_path, enabled=start_backup, yield_callback=yield_background
+    )
+    capture.attach(streams)
+    streams.capture = capture
+
     @asynccontextmanager
     async def lifespan(app):
         if start_backup:
             backup.start()
+            capture.start()
         yield
         stopping.set()
+        await asyncio.to_thread(capture.close)
         await asyncio.to_thread(backup.close)
         await asyncio.to_thread(streams.close)
         pool.shutdown(wait=True, cancel_futures=True)
@@ -150,6 +159,7 @@ def create_app(
     app = FastAPI(title="V360 recording API", version=__version__, lifespan=lifespan)
     app.state.streams = streams
     app.state.backup = backup
+    app.state.capture = capture
     static = Path(__file__).parent / "web"
 
     @app.middleware("http")
@@ -398,6 +408,7 @@ def create_app(
             "battery": battery_status,
             "local_shutdown_available": local_controls(request),
             "backup": backup.snapshot(),
+            "server_capture": capture.snapshot(),
         }
 
     @app.post("/api/local/shutdown", dependencies=[Depends(authorize)])

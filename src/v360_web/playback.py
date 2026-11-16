@@ -17,7 +17,7 @@ from .media import find_tool, probe, validate_decode
 from .media_recovery import playable_source
 from .progress import check_cancelled, report
 from .storage import admit, check_free
-from .store import RecordingStore
+from .store import CAPTURE_SOURCES, RecordingStore
 
 
 def paths(root, key, start=None):
@@ -36,6 +36,11 @@ def ready(root: Path, key: str, start=None, *, item=None):
         target, manifest, _ = paths(root, key, start)
         item = RecordingStore(root).get(key) if item is None else item
         if not item or item["state"] != "verified" or not item.get("path"):
+            return None
+        if item.get("source") in CAPTURE_SOURCES:
+            path = (root / item["path"]).resolve()
+            if path.is_relative_to(root.resolve()) and path.is_file():
+                return path
             return None
         source = (root / item["path"]).resolve()
         if not source.is_relative_to(root.resolve()) or not source.is_file():
@@ -78,6 +83,8 @@ def prepare(config: Path, key: str, start=None):
     root = settings.data_root
     store = RecordingStore(root)
     item = store.get(key)
+    if item and item.get("source") in CAPTURE_SOURCES and ready(root, key, item=item):
+        return {"id": key, "state": "ready", "already_present": True, "full": True, "start": 0}
     source = store.media_path(key)
     if not source or not item or item["device_id"] != settings.did:
         raise CameraError("recording_missing", "Download and verify the recording first.")

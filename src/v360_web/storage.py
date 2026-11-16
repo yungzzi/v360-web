@@ -10,6 +10,7 @@ GIB = 1024**3
 ARCHIVE_LIMIT = 15 * GIB
 SERVER_TOTAL_LIMIT = 15 * GIB
 CACHE_LIMIT = GIB
+CAPTURE_LIMIT = 2 * GIB
 FREE_RESERVE = 8 * GIB
 
 
@@ -34,18 +35,23 @@ def admit(root: Path, additional: int, kind: str, replacing: Path | None = None)
     if additional < 0:
         raise ValueError("Negative storage reservation")
     previous = replacing.stat().st_size if replacing and replacing.is_file() else 0
-    used = (
-        usage(root / "media")
-        if kind == "archive"
-        else (usage(root / "previews") + usage(root / "live"))
-    )
-    limit = (
-        min(ARCHIVE_LIMIT, BackupPolicy(root).policy()["archive_limit"])
-        if kind == "archive"
-        else CACHE_LIMIT
-    )
-    if BackupPolicy(root).policy()["mode"] == "server":
-        combined = usage(root / "media") + usage(root / "previews") + usage(root / "live")
+    policy = BackupPolicy(root).policy()
+    if kind == "capture":
+        used = usage(root / "captures")
+        limit = CAPTURE_LIMIT
+    elif kind == "archive":
+        used = usage(root / "media")
+        limit = min(ARCHIVE_LIMIT, policy["archive_limit"])
+    else:
+        used = usage(root / "previews") + usage(root / "live")
+        limit = CACHE_LIMIT
+    if policy["mode"] == "server":
+        combined = (
+            usage(root / "media")
+            + usage(root / "previews")
+            + usage(root / "live")
+            + usage(root / "captures")
+        )
         if combined - previous + additional > SERVER_TOTAL_LIMIT:
             raise CameraError("storage_limit", "Combined recording budget is full.")
         if kind == "cache":
@@ -57,17 +63,20 @@ def admit(root: Path, additional: int, kind: str, replacing: Path | None = None)
 
 
 def summary(root):
+    archive = usage(root / "media")
+    cache = usage(root / "previews") + usage(root / "live")
+    captures = usage(root / "captures")
+    policy = BackupPolicy(root).policy()
+    server = policy["mode"] == "server"
     return {
-        "archive_bytes": usage(root / "media"),
-        "archive_limit": min(ARCHIVE_LIMIT, BackupPolicy(root).policy()["archive_limit"]),
-        "cache_bytes": usage(root / "previews") + usage(root / "live"),
-        "cache_limit": SERVER_TOTAL_LIMIT
-        if BackupPolicy(root).policy()["mode"] == "server"
-        else CACHE_LIMIT,
-        "combined_bytes": usage(root / "media") + usage(root / "previews") + usage(root / "live"),
-        "combined_limit": SERVER_TOTAL_LIMIT
-        if BackupPolicy(root).policy()["mode"] == "server"
-        else None,
+        "archive_bytes": archive,
+        "archive_limit": min(ARCHIVE_LIMIT, policy["archive_limit"]),
+        "cache_bytes": cache,
+        "cache_limit": SERVER_TOTAL_LIMIT if server else CACHE_LIMIT,
+        "capture_bytes": captures,
+        "capture_limit": CAPTURE_LIMIT,
+        "combined_bytes": archive + cache + captures,
+        "combined_limit": SERVER_TOTAL_LIMIT if server else None,
         "free_bytes": shutil.disk_usage(root).free,
         "free_reserve": FREE_RESERVE,
         "automatic_cleanup": True,

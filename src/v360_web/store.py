@@ -11,6 +11,11 @@ from pathlib import Path
 
 MIGRATION_LOCK = threading.RLock()
 
+SD_SOURCE = "sd"
+WATCH_SOURCE = "watch"
+SCHEDULED_SOURCE = "scheduled"
+CAPTURE_SOURCES = frozenset({WATCH_SOURCE, SCHEDULED_SOURCE})
+
 
 class RecordingStore:
     def __init__(self, root: Path):
@@ -37,6 +42,7 @@ class RecordingStore:
                 ("downloaded_at", "TEXT"),
                 ("validated_at", "TEXT"),
                 ("web_ready_at", "TEXT"),
+                ("source", f"TEXT NOT NULL DEFAULT '{SD_SOURCE}'"),
             ]:
                 if name not in columns:
                     db.execute(f"ALTER TABLE recordings ADD COLUMN {name} {definition}")
@@ -158,6 +164,7 @@ class RecordingStore:
                     # Device-declared seconds are approximate, never a continuity guarantee.
                     "duration_hint": duration if 0 < duration <= 3600 else None,
                     "state": row["state"],
+                    "source": row["source"],
                     "original_ready": self.media_path(row["id"], item=row) is not None,
                 }
             )
@@ -200,6 +207,38 @@ class RecordingStore:
         with self.connection() as db:
             assignments = ",".join(f"{name}=?" for name in updates)
             db.execute(f"UPDATE recordings SET {assignments} WHERE id=?", [*updates.values(), key])
+
+    def add_capture(self, did, key, source, start_local, duration, path, size, sha256):
+        """Register a server-side live capture as an immediately playable recording."""
+        if source not in CAPTURE_SOURCES:
+            raise ValueError("Unsupported capture source")
+        started = datetime.fromisoformat(start_local)
+        with self.connection() as db:
+            db.execute(
+                """INSERT INTO recordings
+                (id,device_id,channel,start_local,duration_raw,event_type,remote_status,weekday,
+                 state,path,bytes,sha256,updated_at,saved_at,validated_at,web_ready_at,source)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    key,
+                    did,
+                    0,
+                    start_local,
+                    max(1, int(duration)),
+                    0,
+                    0,
+                    started.isoweekday(),
+                    "verified",
+                    path,
+                    size,
+                    sha256,
+                    self.timestamp(),
+                    self.timestamp(),
+                    self.timestamp(),
+                    self.timestamp(),
+                    source,
+                ),
+            )
 
     def mark_web_ready(self, key):
         with self.connection() as db:
