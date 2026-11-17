@@ -1104,3 +1104,38 @@ def test_fastapi_shutdown_timeout_preserves_tail_for_restart(
                 validate_decode(root / row["path"])
     finally:
         release.set()
+
+
+def test_recovery_tops_up_more_than_queue_capacity(manager, monkeypatch):
+    capture, config = manager
+    captures = capture.root / "captures"
+    captures.mkdir(parents=True)
+    start = datetime(2026, 11, 16, 6)
+    for index in range(9):
+        key = f"{index:032x}"
+        path = captures / (key + ".pending")
+        path.write_bytes(b"sealed")
+        server_capture.write_pending_meta(
+            path, key, WATCH_SOURCE, start, None, False, "0" * 64
+        )
+    monkeypatch.setattr(
+        server_capture,
+        "probe",
+        lambda path: {"streams": [{"codec_type": "video"}]},
+    )
+    monkeypatch.setattr(server_capture, "validate_decode", lambda path: None)
+    restarted = server_capture.CaptureManager(capture.root, config, enabled=True)
+    try:
+        rows = wait_for_rows(capture.root, minimum=9, timeout=20)
+        assert len(rows) == 9
+        assert len({row["id"] for row in rows}) == 9
+        assert not list(captures.glob("*.pending"))
+        deadline = time.monotonic() + 5
+        while restarted.recovery_pending or restarted.recovery_inflight:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        assert not restarted.recovery_pending
+        assert not restarted.recovery_inflight
+    finally:
+        restarted.close(timeout=5)

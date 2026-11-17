@@ -9,6 +9,7 @@ renamed and indexed as a verified recording.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 import logging
@@ -173,6 +174,7 @@ class SegmentFinalizer:
                 if isinstance(job, tuple) and job and job[0] == "flush":
                     job[1].set()
                     continue
+                path = job[0] if isinstance(job, tuple) and job else None
                 with self.lock:
                     self.active = True
                 try:
@@ -180,6 +182,10 @@ class SegmentFinalizer:
                 finally:
                     with self.lock:
                         self.active = False
+                    if path is not None:
+                        callback = getattr(self.manager, "recovery_done", None)
+                        if callback is not None:
+                            callback(path)
             finally:
                 self.queue.task_done()
 
@@ -653,6 +659,8 @@ class CaptureManager:
         self.active = None
         self.sources = {WATCH_SOURCE: 0, SCHEDULED_SOURCE: 0}
         self.finalizer = SegmentFinalizer(self)
+        self.recovery_pending = collections.deque()
+        self.recovery_inflight = set()
         self.shutdown_complete = None
         self.shutdown_error = None
         if self.enabled and self.config_path is not None:
@@ -689,19 +697,36 @@ class CaptureManager:
         if pending and self.did is None:
             LOGGER.warning("Server capture recovery waits for a configured device")
             return
-        for path in pending:
-            if not path.is_file() or path.is_symlink():
-                continue
-            job = read_pending_meta(path)
-            if job is None:
-                path.unlink(missing_ok=True)
-                pending_meta(path).unlink(missing_ok=True)
-                continue
-            if not self.finalizer.submit(job):
-                LOGGER.warning(
-                    "Server capture recovery left sealed segments for a later startup"
-                )
-                break
+        self.recovery_pending.extend(pending)
+        self.fill_recovery()
+
+    def fill_recovery(self):
+        """Top up the bounded validation queue whenever a slot is free."""
+        with self.guard:
+            while self.recovery_pending and not self.finalizer.closed:
+                path = self.recovery_pending[0]
+                if path in self.recovery_inflight:
+                    self.recovery_pending.popleft()
+                    continue
+                if not path.is_file() or path.is_symlink():
+                    self.recovery_pending.popleft()
+                    pending_meta(path).unlink(missing_ok=True)
+                    continue
+                job = read_pending_meta(path)
+                if job is None:
+                    self.recovery_pending.popleft()
+                    path.unlink(missing_ok=True)
+                    pending_meta(path).unlink(missing_ok=True)
+                    continue
+                if not self.finalizer.submit(job):
+                    return
+                self.recovery_pending.popleft()
+                self.recovery_inflight.add(path)
+
+    def recovery_done(self, path):
+        with self.guard:
+            self.recovery_inflight.discard(path)
+        self.fill_recovery()
 
     def available(self):
         if not self.enabled:
