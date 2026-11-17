@@ -1,4 +1,5 @@
 import hashlib
+import time
 from datetime import date, datetime
 from types import SimpleNamespace
 
@@ -147,6 +148,13 @@ def test_download_job_persists_progress(tmp_path, monkeypatch):
     app = create_app(tmp_path, TOKEN, tmp_path / "not-read.json")
     with TestClient(app) as client:
         job = client.post("/api/jobs/download/example", headers=HEADERS).json()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            value = client.get("/api/jobs/" + job["id"], headers=HEADERS).json()
+            if value["state"] in ("complete", "failed"):
+                break
+            time.sleep(0.01)
+        assert value["state"] == "complete"
     value = JobStore(tmp_path).get_job(job["id"])
     assert value["state"] == "complete" and value["progress"] == {
         "stage": "downloading",

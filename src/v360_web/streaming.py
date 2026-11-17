@@ -20,6 +20,8 @@ from .controls import CameraControls
 from .errors import CameraError
 from .lenses import crop_filter, source_view
 from .media import find_tool
+from .server_capture import now_local
+from .store import WATCH_SOURCE
 
 MAX_BOX = 2 * 1024**2
 MAX_VIEWERS = 3
@@ -285,7 +287,12 @@ class Subscriber:
 
 class StreamManager:
     def __init__(
-        self, config: Path | None, camera_lock, source_factory=camera_frames, before_subscribe=None
+        self,
+        config: Path | None,
+        camera_lock,
+        source_factory=camera_frames,
+        before_subscribe=None,
+        capture=None,
     ):
         self.config = config
         self.lens = 0
@@ -293,6 +300,8 @@ class StreamManager:
         self.source_factory = source_factory
         self.guard = threading.Lock()
         self.viewers = set()
+        self.capture = capture
+        self.recorder = None
         self.thread = None
         self.stop = threading.Event()
         self.initialization = None
@@ -315,6 +324,10 @@ class StreamManager:
                 "fragments": self.fragments,
                 "audio": bool(self.initialization and "mp4a.40.2" in self.initialization[0]),
                 "audio_frames": self.audio_frames,
+                "recording": bool(self.capture and self.capture.recording),
+                "recording_source": (
+                    self.capture.recording_source if self.capture and self.capture.recording else None
+                ),
                 "session_limit_seconds": 1800,
                 "control_error": self.controls.error,
                 "ptz_active": bool(self.controls.sent),
@@ -325,6 +338,8 @@ class StreamManager:
             raise CameraError("lens_unavailable", "Unknown view.")
         if self.before_subscribe:
             self.before_subscribe()
+        handoff = None
+        seed = None
         with self.guard:
             if self.shutdown_requested or self.config is None:
                 raise CameraError("stream_unavailable", "Live service is not configured.")
@@ -334,6 +349,14 @@ class StreamManager:
             if active and self.stop.is_set():
                 raise CameraError("camera_busy", "Previous live session is stopping.")
             if active and lens != self.lens:
+                # A capture-only session has no real audience; release it for viewing.
+                if not self.viewers and self.recorder is not None:
+                    self.recorder.request_stop()
+                    self.stop.set()
+                    self.state = "stopping"
+                    raise CameraError(
+                        "camera_busy", "A fallback recording is finishing before this view."
+                    )
                 raise CameraError("lens_busy", "Another window is watching a different view.")
             if not active:
                 if not self.camera_lock.acquire(blocking=False):
@@ -343,6 +366,22 @@ class StreamManager:
                 self.initialization = None
                 self.state, self.error = "starting", None
                 self.frames = self.fragments = self.audio_frames = 0
+            if lens == 0 and self.capture and (
+                self.recorder is None or self.recorder.done
+            ):
+                try:
+                    self.recorder = self.capture.new_watch()
+                    if self.recorder is not None and self.initialization is not None:
+                        seed = (self.recorder, self.initialization)
+                except Exception:  # noqa: BLE001 -- recording must never block viewing
+                    self.recorder = None
+            elif (
+                lens == 0
+                and self.recorder is not None
+                and not self.recorder.done
+                and self.recorder.source != WATCH_SOURCE
+            ):
+                handoff = self.recorder
             viewer = Subscriber()
             self.viewers.add(viewer)
             if self.initialization:
@@ -350,14 +389,68 @@ class StreamManager:
             if not active:
                 self.thread = threading.Thread(target=self._run, name="v360-live", daemon=True)
                 self.thread.start()
-            return viewer
+        if seed is not None:
+            sink, initialization = seed
+            sink.publish("init", initialization, now_local(), time.monotonic())
+        if handoff is not None:
+            handoff.handoff(WATCH_SOURCE, now_local(), time.monotonic())
+        return viewer
+
+    def start_capture(self, duration, source):
+        """Start a camera-less-subscriber session for scheduled fallback capture."""
+        if self.before_subscribe:
+            self.before_subscribe()
+        with self.guard:
+            if self.shutdown_requested or self.config is None:
+                raise CameraError("stream_unavailable", "Live service is not configured.")
+            active = self.thread is not None and self.thread.is_alive()
+            if active or self.camera_lock.locked():
+                raise CameraError("camera_busy", "The camera is already in use.")
+            if not self.camera_lock.acquire(blocking=False):
+                raise CameraError("camera_busy", "A camera operation is already running.")
+            try:
+                recorder = self.capture.new_scheduled(duration) if self.capture else None
+            except Exception:  # noqa: BLE001 -- never block live service on capture errors
+                recorder = None
+            if recorder is None:
+                self.camera_lock.release()
+                raise CameraError("capture_unavailable", "Fallback recording is not available.")
+            self.lens = 0
+            self.recorder = recorder
+            self.stop.clear()
+            self.initialization = None
+            self.state, self.error = "starting", None
+            self.frames = self.fragments = self.audio_frames = 0
+            self.thread = threading.Thread(target=self._run, name="v360-live", daemon=True)
+            self.thread.start()
+
+    def recording_done(self, sink):
+        with self.guard:
+            if self.recorder is sink:
+                self.recorder = None
+            if (
+                not self.viewers
+                and not self.stop.is_set()
+                and self.thread
+                and self.thread.is_alive()
+            ):
+                self.stop.set()
+                self.state = "stopping"
 
     def unsubscribe(self, viewer):
+        recorder = None
         with self.guard:
             self.controls.release(viewer.identity)
             self.viewers.discard(viewer)
             viewer.closed.set()
             if not self.viewers:
+                recorder = self.recorder
+                if recorder is not None and (
+                    recorder.source == WATCH_SOURCE or recorder.handoff_source == WATCH_SOURCE
+                ):
+                    recorder.request_stop()
+                # Stop delivering to viewers immediately; the recorder drains its
+                # bounded queue and finalizes the remaining fragments in background.
                 self.stop.set()
                 if self.thread and self.thread.is_alive():
                     self.state = "stopping"
@@ -385,8 +478,16 @@ class StreamManager:
                 except queue.Full:
                     viewer.closed.set()
                     self.viewers.remove(viewer)
-            if not self.viewers:
-                self.stop.set()
+            recorder = self.recorder
+        if recorder is not None:
+            try:
+                recorder.publish(event, value, now_local(), time.monotonic())
+            except Exception:  # noqa: BLE001 -- recording must never stop live delivery
+                recorder.abort("capture_failed")
+        if event == "fragment" and not self.viewers:
+            with self.guard:
+                if self.recorder is None or self.recorder.done:
+                    self.stop.set()
 
     def _read_output(self, process):
         def read(size):
@@ -498,6 +599,12 @@ class StreamManager:
                     raise CameraError("encoder_timeout", "Media input queue is full.") from error
                 if kind == "video":
                     self.frames += 1
+                    recorder = self.recorder
+                    if recorder is not None:
+                        try:
+                            recorder.note_video(now_local(), time.monotonic())
+                        except Exception:  # noqa: BLE001 -- recording must never stop viewing
+                            recorder.abort("capture_failed")
                 else:
                     self.audio_frames += 1
         except CameraError as error:
@@ -533,6 +640,9 @@ class StreamManager:
                     output.join(timeout=2)
                 process.stdout.close()
                 self.encoder_pid = None
+            recorder = self.recorder
+            if recorder is not None and not recorder.done:
+                recorder.close("stream_end", wait=False)
             with self.guard:
                 self.state = "failed" if self.error else "stopped"
                 for viewer in self.viewers:
@@ -546,5 +656,10 @@ class StreamManager:
             self.shutdown_requested = True
             self.stop.set()
             thread = self.thread
+            recorder = self.recorder
         if thread:
             thread.join(timeout=50)
+        # The live thread only queues the final close; wait for the writer to
+        # seal and enqueue the tail before the service closes validation.
+        if recorder is not None and hasattr(recorder, "wait_writer"):
+            recorder.wait_writer(10)

@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from . import storage
 from .backup_policy import BackupPolicy
 from .errors import CameraError
-from .store import RecordingStore
+from .store import CAPTURE_SOURCES, RecordingStore
 
 GUARD = threading.RLock()
 ACTIVE_GUARD = threading.Lock()
@@ -152,6 +152,60 @@ def cleanup(root, additional=0, kind="archive", protected=None):
         return {"removed_recordings": len(removed), "removed_cache_bytes": removed_cache}
 
 
+def cleanup_captures(root, additional=0, protected=None, *, admit=True):
+    """Reclaim only old, unused server captures; never touch SD-archive originals."""
+    with GUARD:
+        config = BackupPolicy(root)
+        store = RecordingStore(root)
+        rows = sorted(
+            (
+                row
+                for row in store.list()
+                if row["source"] in CAPTURE_SOURCES and row["state"] == "verified"
+            ),
+            key=lambda row: row["saved_at"] or row["updated_at"],
+        )
+        used = storage.usage(root / "captures")
+        combined = sum(
+            storage.usage(root / folder) for folder in ("media", "previews", "live", "captures")
+        )
+        required_values = [
+            0,
+            used + additional - storage.CAPTURE_LIMIT,
+            storage.FREE_RESERVE + additional - storage.shutil.disk_usage(root).free,
+        ]
+        if config.policy()["mode"] == "server":
+            required_values.append(combined + additional - storage.SERVER_TOTAL_LIMIT)
+        required = max(required_values)
+        removed = []
+        for row in rows:
+            if required <= 0:
+                break
+            key = row["id"]
+            path = owned(root, "captures", key, ".mp4")
+            if (
+                key == protected
+                or row["pinned"]
+                or store.leased(key)
+                or active(root, key)
+                or path is None
+                or not row["path"]
+                or (root / row["path"]).resolve() != path.resolve()
+                or not path.is_file()
+            ):
+                continue
+            size = path.stat().st_size
+            path.unlink()
+            used -= size
+            combined -= size
+            required -= size
+            store.update(key, "evicted", path=None, error=None)
+            removed.append(key)
+        if admit:
+            storage.admit(root, additional, "capture")
+        return {"removed_recordings": len(removed), "ids": removed}
+
+
 def preview_suffixes(root, key, windows=None):
     """Only owned, bounded window names share the parent recording lease/quota."""
     yield ".mp4"
@@ -172,7 +226,11 @@ def cleanup_combined(root, store, rows, policy, additional, protected):
     limit = storage.SERVER_TOTAL_LIMIT
     if additional > limit:
         raise CameraError("storage_limit", "Incoming file exceeds combined budget.")
-    used = sum(storage.usage(root / folder) for folder in ("media", "previews", "live"))
+    # Server captures share this budget but are lower priority than SD originals.
+    cleanup_captures(root, additional, admit=False)
+    used = sum(
+        storage.usage(root / folder) for folder in ("media", "previews", "live", "captures")
+    )
     required = max(
         0,
         used + additional - limit,
