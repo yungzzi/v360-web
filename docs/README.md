@@ -8,6 +8,7 @@
 | --- | --- |
 | 浏览历史、下载和失败补取 | [历史录像](recording-library.md) |
 | 自动下载、处理、重试及清理 | [自动保存](automatic-archive.md) |
+| 备用录像时间表、电量历史、停用 SD 同步 | [服务器备用录像](server-recording.md) |
 | 批次何时可看 | [半小时批次发布](scheduled-publication.md) |
 | 时间轴和快照 | [时间轴交互](history-timeline.md) |
 | 登录、中文密码和恢复 | [访问密码](browser-password.md)、[登录保持](browser-sessions-responsive.md) |
