@@ -1,4 +1,6 @@
+import sqlite3
 import struct
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -112,3 +114,32 @@ def test_history_query_defaults_to_today_and_requires_auth(tmp_path):
             "/api/battery/history?day=not-a-day",
             headers={"Authorization": "Bearer " + token},
         ).status_code == 422
+
+
+def test_save_returns_immediately_when_history_is_locked(tmp_path):
+    settings = SimpleNamespace(did="lock-camera", data_root=tmp_path)
+    history = battery_history.history_for(tmp_path)
+    lock = sqlite3.connect(history.database, timeout=0.1)
+    lock.execute("BEGIN IMMEDIATE")
+    lock.execute("INSERT INTO battery_history VALUES ('other','2026-01-01T00:00:00',1,0)")
+    day = battery_history.now_local().date()
+    writer = battery_history.writer_for(tmp_path)
+    try:
+        started = time.monotonic()
+        value = battery.save(settings, {"percent": 55, "charging": True})
+        elapsed = time.monotonic() - started
+        # The cache write is local; history goes to a bounded queue and never waits.
+        assert elapsed < 0.2
+        assert value["percent"] == 55 and value["stale"] is False
+        assert battery.cached(settings)["percent"] == 55
+        # The writer gives up while the lock is still held instead of blocking.
+        assert writer.drain(10)
+        assert history.day(day, "lock-camera") == []
+    finally:
+        lock.rollback()
+        lock.close()
+
+    # Once the writer is free again the next reading is stored normally.
+    assert writer.offer("lock-camera", 54, True)
+    assert writer.drain(10)
+    assert [row["percent"] for row in history.day(day, "lock-camera")] == [54]

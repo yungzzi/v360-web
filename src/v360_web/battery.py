@@ -67,11 +67,10 @@ def save(settings, value):
 
 
 def remember(settings, value):
-    """Keep the reading for later trend review; a failure never breaks viewing."""
+    """Queue the reading for later trend review; never waits on the database."""
     try:
-        battery_history.history_for(settings.data_root).record(
+        return battery_history.writer_for(settings.data_root).offer(
             settings.did, value.get("percent"), value.get("charging")
         )
     except (OSError, sqlite3.Error, ValueError):
         return False
-    return True

@@ -3,12 +3,18 @@
 Rows are written from the reading a watching or scheduled session already takes
 on its existing camera connection: no extra handshake, no extra query. Every row
 is de-duplicated against the previous one, capped per device, and pruned by age.
+
+The camera control loop must never wait on this table: readings are handed to a
+bounded queue and written by one background thread, so a locked database only
+costs a dropped sample.
 """
 
 from __future__ import annotations
 
+import queue
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +24,7 @@ ZONE = ZoneInfo("Asia/Hong_Kong")
 DEDUPE_SECONDS = 240
 RETENTION_DAYS = 30
 MAX_ROWS_PER_DEVICE = 12000
+WRITER_QUEUE_SIZE = 64
 
 
 def now_local():
@@ -128,15 +135,93 @@ class BatteryHistory:
         }
 
 
+class HistoryWriter:
+    """Bounded hand-off from the camera control loop to one history writer.
+
+    ``offer`` never touches SQLite and never blocks: the table is opened and the
+    row is written on the writer thread, so a database held by another writer
+    only costs the queued sample instead of delaying a camera command.
+    """
+
+    def __init__(self, root, capacity=WRITER_QUEUE_SIZE):
+        self.root = Path(root).resolve()
+        self.queue = queue.Queue(maxsize=capacity)
+        self.guard = threading.Lock()
+        self.busy = threading.Event()
+        self.history = None
+        self.dropped = 0
+        self.failed = 0
+        self.written = 0
+        self.thread = threading.Thread(
+            target=self._run, name="v360-battery-history", daemon=True
+        )
+        self.thread.start()
+
+    def offer(self, did, percent, charging, at=None):
+        """Queue one reading; False means it was rejected, never that we waited."""
+        if not did or percent is None:
+            return False
+        item = (did, percent, charging, at or now_local())
+        try:
+            self.queue.put_nowait(item)
+            return True
+        except queue.Full:
+            with self.guard:
+                self.dropped += 1
+            return False
+
+    def drain(self, timeout=10):
+        """Wait for queued readings; used by tests and orderly shutdown."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.queue.empty() and not self.busy.is_set():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def _store(self):
+        if self.history is None:
+            self.history = BatteryHistory(self.root)
+        return self.history
+
+    def _run(self):
+        while True:
+            try:
+                item = self.queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            self.busy.set()
+            try:
+                if self._store().record(*item):
+                    self.written += 1
+            except (OSError, sqlite3.Error, ValueError):
+                with self.guard:
+                    self.failed += 1
+            finally:
+                self.busy.clear()
+                self.queue.task_done()
+
+
 _HISTORY = {}
+_WRITERS = {}
 _HISTORY_GUARD = threading.Lock()
 
 
 def history_for(root):
-    """One writer per data directory; each call still opens its own connection."""
+    """One reader per data directory; each call still opens its own connection."""
     key = str(Path(root).resolve())
     with _HISTORY_GUARD:
         history = _HISTORY.get(key)
         if history is None:
             history = _HISTORY[key] = BatteryHistory(key)
         return history
+
+
+def writer_for(root):
+    """One bounded writer thread per data directory; construction never opens SQLite."""
+    key = str(Path(root).resolve())
+    with _HISTORY_GUARD:
+        writer = _WRITERS.get(key)
+        if writer is None:
+            writer = _WRITERS[key] = HistoryWriter(key)
+        return writer
