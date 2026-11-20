@@ -216,3 +216,75 @@ def test_history_writer_drops_instead_of_blocking_when_full(tmp_path, monkeypatc
     finally:
         hold.set()
         writer.drain(5)
+
+
+def test_first_history_read_does_not_delay_ptz_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "v360_web.controls.time", SimpleNamespace(monotonic=lambda: 200.0)
+    )
+    sent = []
+    settings = SimpleNamespace(did="watch-battery", data_root=tmp_path, command_channel=0)
+    frames = bytearray()
+
+    def send(command, payload):
+        sent.append((command, payload))
+        if command == 912:
+            frames.extend(protocol.command_frame(913, struct.pack("<iii", 58, 40200, 0)))
+
+    def rpc(op, **args):
+        data = bytes(frames[:13])
+        del frames[:13]
+        return {"ret": -3, "data": base64.b64encode(data).decode()}
+
+    control = CameraControls()
+    control.thread = SimpleNamespace(is_alive=lambda: True)
+    control.camera = SimpleNamespace(
+        settings=settings, session=5, send=send, bridge=SimpleNamespace(rpc=rpc)
+    )
+
+    root = tmp_path / "data"
+    root.mkdir()
+    database = root / "recordings.sqlite3"
+    setup = sqlite3.connect(database)
+    setup.execute("CREATE TABLE lock_holder (id INTEGER PRIMARY KEY)")
+    setup.execute("INSERT INTO lock_holder VALUES (1)")
+    setup.commit()
+    setup.close()
+    lock = sqlite3.connect(database, timeout=0.1)
+    lock.execute("BEGIN IMMEDIATE")
+    lock.execute("INSERT INTO lock_holder VALUES (2)")
+
+    errors = []
+
+    def first_read():
+        try:
+            battery_history.history_for(root)
+        except Exception as error:  # noqa: BLE001 -- the locked table may refuse to be created
+            errors.append(error)
+
+    reader = threading.Thread(target=first_read, name="first-history-read", daemon=True)
+    try:
+        reader.start()
+        time.sleep(0.2)
+        # The tick that receives a battery packet must not wait for the reader.
+        started = time.monotonic()
+        for _ in range(4):
+            control.step(200)
+        assert time.monotonic() - started < 0.3
+        assert battery.cached(settings)["percent"] == 58
+
+        control.request_move("viewer", 3)
+        control.move_tick(200)
+        assert sent[-1] == (4097, bytes([3, 8, 0, 0, 0, 0, 3, 0]))
+        started = time.monotonic()
+        control.step(200.5)
+        assert time.monotonic() - started < 0.3
+        assert sent[-1] == (4097, bytes([0, 8, 0, 0, 0, 0, 3, 0]))
+        assert control.error is None
+        # The reader is still waiting for the table it cannot create.
+        assert reader.is_alive() or errors
+    finally:
+        lock.rollback()
+        lock.close()
+        reader.join(5)
+    assert not reader.is_alive()

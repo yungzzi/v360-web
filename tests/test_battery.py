@@ -1,5 +1,6 @@
 import sqlite3
 import struct
+import threading
 import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -143,3 +144,55 @@ def test_save_returns_immediately_when_history_is_locked(tmp_path):
     assert writer.offer("lock-camera", 54, True)
     assert writer.drain(10)
     assert [row["percent"] for row in history.day(day, "lock-camera")] == [54]
+
+
+def _seed_locked_database(root):
+    """Hold a write transaction on a database that has no history table yet.
+
+    Creating the table therefore needs the write lock, which is what a first
+    history query does while the camera control loop is running.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    database = root / "recordings.sqlite3"
+    setup = sqlite3.connect(database)
+    setup.execute("CREATE TABLE lock_holder (id INTEGER PRIMARY KEY)")
+    setup.execute("INSERT INTO lock_holder VALUES (1)")
+    setup.commit()
+    setup.close()
+    lock = sqlite3.connect(database, timeout=0.1)
+    lock.execute("BEGIN IMMEDIATE")
+    lock.execute("INSERT INTO lock_holder VALUES (2)")
+    return lock
+
+
+def test_first_history_read_does_not_block_saving(tmp_path):
+    root = tmp_path / "data"
+    settings = SimpleNamespace(did="fresh-camera", data_root=root)
+    lock = _seed_locked_database(root)
+    errors = []
+
+    def first_read():
+        try:
+            battery_history.history_for(root)
+        except Exception as error:  # noqa: BLE001 -- the locked table may refuse to be created
+            errors.append(error)
+
+    reader = threading.Thread(target=first_read, name="first-history-read", daemon=True)
+    try:
+        reader.start()
+        # Let the reader reach the locked CREATE TABLE before saving.
+        time.sleep(0.2)
+        started = time.monotonic()
+        value = battery.save(settings, {"percent": 52, "charging": False})
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.3
+        assert value["percent"] == 52 and battery.cached(settings)["percent"] == 52
+        assert reader.is_alive() or errors
+        writer = battery_history.writer_for(root)
+        assert writer.drain(10)
+        assert writer.thread is not None
+    finally:
+        lock.rollback()
+        lock.close()
+        reader.join(5)
+    assert not reader.is_alive()

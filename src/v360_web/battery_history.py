@@ -144,7 +144,7 @@ class HistoryWriter:
     """
 
     def __init__(self, root, capacity=WRITER_QUEUE_SIZE):
-        self.root = Path(root).resolve()
+        self.root = Path(root)
         self.queue = queue.Queue(maxsize=capacity)
         self.guard = threading.Lock()
         self.busy = threading.Event()
@@ -152,16 +152,26 @@ class HistoryWriter:
         self.dropped = 0
         self.failed = 0
         self.written = 0
-        self.thread = threading.Thread(
-            target=self._run, name="v360-battery-history", daemon=True
-        )
-        self.thread.start()
+        self.thread = None
+        self.start_guard = threading.Lock()
+
+    def _ensure_thread(self):
+        if self.thread is not None:
+            return
+        with self.start_guard:
+            if self.thread is None:
+                thread = threading.Thread(
+                    target=self._run, name="v360-battery-history", daemon=True
+                )
+                thread.start()
+                self.thread = thread
 
     def offer(self, did, percent, charging, at=None):
         """Queue one reading; False means it was rejected, never that we waited."""
         if not did or percent is None:
             return False
         item = (did, percent, charging, at or now_local())
+        self._ensure_thread()
         try:
             self.queue.put_nowait(item)
             return True
@@ -205,22 +215,30 @@ class HistoryWriter:
 _HISTORY = {}
 _WRITERS = {}
 _HISTORY_GUARD = threading.Lock()
+_WRITERS_GUARD = threading.Lock()
 
 
 def history_for(root):
-    """One reader per data directory; each call still opens its own connection."""
+    """One reader per data directory; each call still opens its own connection.
+
+    Building the reader creates the table, which can wait on a database lock, so
+    it happens outside the registry lock: a slow reader must never hold up the
+    writer used by the camera control loop.
+    """
     key = str(Path(root).resolve())
     with _HISTORY_GUARD:
         history = _HISTORY.get(key)
-        if history is None:
-            history = _HISTORY[key] = BatteryHistory(key)
+    if history is not None:
         return history
+    created = BatteryHistory(key)
+    with _HISTORY_GUARD:
+        return _HISTORY.setdefault(key, created)
 
 
 def writer_for(root):
-    """One bounded writer thread per data directory; construction never opens SQLite."""
+    """One writer per data directory; nothing inside the lock touches SQLite."""
     key = str(Path(root).resolve())
-    with _HISTORY_GUARD:
+    with _WRITERS_GUARD:
         writer = _WRITERS.get(key)
         if writer is None:
             writer = _WRITERS[key] = HistoryWriter(key)
