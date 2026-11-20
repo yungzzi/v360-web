@@ -29,6 +29,12 @@ from .store import CAPTURE_SOURCES, SCHEDULED_SOURCE, WATCH_SOURCE, RecordingSto
 
 ZONE = ZoneInfo("Asia/Hong_Kong")
 SEGMENT_SECONDS = 60
+DAY_FIRST_HOUR = 6
+DAY_END_HOUR = 19
+DAY_INTERVAL_MINUTES = 5
+DAY_CLIP_SECONDS = 30
+NIGHT_INTERVAL_MINUTES = 10
+NIGHT_CLIP_SECONDS = 15
 RESERVATION = 8 * 1024**2
 CAPTURE_QUEUE_SIZE = 32
 CAPTURE_FINALIZE_QUEUE_SIZE = 8
@@ -87,22 +93,22 @@ def read_pending_meta(path):
         return None
 
 
+def daylight(hour: int):
+    """06:00–19:00 local time keeps the denser sampling plan."""
+    return DAY_FIRST_HOUR <= hour < DAY_END_HOUR
+
+
 def next_slot(now: datetime):
-    """Return the next local-time sampling boundary and its duration."""
-    if 6 <= now.hour < 18:
-        interval = 10
-        base = now.replace(minute=0, second=0, microsecond=0)
-    else:
-        interval = 30
-        base = (
-            now.replace(hour=18, minute=0, second=0, microsecond=0)
-            if now.hour >= 18
-            else (now - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
-        )
-    elapsed = (now - base).total_seconds()
-    steps = int(elapsed // (interval * 60)) + 1
+    """Return the next local-time sampling boundary and its duration.
+
+    Boundaries are aligned to the wall clock, so the 06:00 and 19:00 switch
+    points are exact and the overnight plan starts again at midnight.
+    """
+    interval = DAY_INTERVAL_MINUTES if daylight(now.hour) else NIGHT_INTERVAL_MINUTES
+    base = now.replace(minute=0, second=0, microsecond=0)
+    steps = int((now - base).total_seconds() // (interval * 60)) + 1
     due = base + timedelta(minutes=steps * interval)
-    return due, 30 if 6 <= due.hour < 18 else 15
+    return due, DAY_CLIP_SECONDS if daylight(due.hour) else NIGHT_CLIP_SECONDS
 
 
 class SegmentFinalizer:

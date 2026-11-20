@@ -1,11 +1,13 @@
 """Manual, cached battery query; never wakes a camera during page polling."""
 
 import hashlib
+import sqlite3
 import struct
 import time
 import uuid
 from pathlib import Path
 
+from . import battery_history
 from .client import CameraClient
 from .config import Settings, read_private_json, write_private_json
 from .errors import CameraError
@@ -60,4 +62,16 @@ def save(settings, value):
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+    remember(settings, value)
     return {**value, "stale": False, "from_cache": False}
+
+
+def remember(settings, value):
+    """Keep the reading for later trend review; a failure never breaks viewing."""
+    try:
+        battery_history.history_for(settings.data_root).record(
+            settings.did, value.get("percent"), value.get("charging")
+        )
+    except (OSError, sqlite3.Error, ValueError):
+        return False
+    return True

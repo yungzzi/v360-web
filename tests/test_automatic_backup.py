@@ -11,6 +11,7 @@ from v360_web import maintenance, progress, service, storage
 from v360_web.api import create_app
 from v360_web.backup import BackupManager
 from v360_web.backup_policy import BackupPolicy
+from v360_web.config import write_private_json
 from v360_web.errors import CameraError
 from v360_web.protocol import RecordingEvent
 from v360_web.store import RecordingStore
@@ -744,3 +745,62 @@ def test_recent_rejection_retries_before_deadline_but_history_is_bounded(tmp_pat
     now = time.time()
     assert backup.failed(recent, now, "download_rejected") == now + 60
     assert backup.failed(old, now, "download_rejected") == now + 3600
+
+
+def test_disabled_sd_sync_stops_catalog_and_download_after_restart(tmp_path, monkeypatch):
+    key, _ = record(tmp_path, state="discovered")
+    backup = manager(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "discover",
+        lambda *args: calls.append("discover") or {"metadata_complete": True, "records": 1},
+    )
+    monkeypatch.setattr(service, "download", lambda *args: calls.append("download"))
+    backup.cycle()
+    assert calls == ["discover", "download"]
+
+    backup.configure({"enabled": False, "mode": "server"})
+    calls.clear()
+    backup.cycle()
+    restarted = manager(tmp_path, monkeypatch)
+    assert restarted.snapshot()["state"] == "paused"
+    restarted.cycle()
+    assert calls == []
+    assert restarted.db.policy()["enabled"] is False
+    assert RecordingStore(tmp_path).get(key)["state"] == "discovered"
+
+
+def test_disabled_sd_sync_keeps_manual_entries_and_saved_files(tmp_path, monkeypatch):
+    root = tmp_path / "data"
+    store = RecordingStore(root)
+    start = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None) - timedelta(minutes=5)
+    key = store.discover("MATE-capture", 0, [RecordingEvent(start, 0, 2, 1, 1)])[0]
+    path = root / "media" / (key + ".media")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * 32)
+    store.update(key, "verified", path="media/" + path.name, bytes=32)
+    config = tmp_path / ".private/device.json"
+    write_private_json(config.parent / "sdk-profiles.json", {"initialize": "unused-test-profile"})
+    write_private_json(
+        config,
+        {
+            "device": {"did": "MATE-capture", "password": "example"},
+            "bridge": {"adapter": "native-arm64"},
+        },
+    )
+    monkeypatch.setattr(service, "download", lambda *args: None)
+    app = create_app(root, TOKEN, config)
+    monkeypatch.setattr(app.state.backup, "start", lambda: None)
+    with TestClient(app) as client:
+        body = {"enabled": False, "mode": "server", "interval_minutes": 10}
+        value = client.put("/api/backup", headers=HEADERS, json=body).json()
+        assert value["policy"]["enabled"] is False and value["state"] == "paused"
+        assert client.post(f"/api/jobs/download/{key}", headers=HEADERS).status_code == 202
+        assert client.post("/api/backup/run", headers=HEADERS).status_code == 409
+        day = datetime.now(ZoneInfo("Asia/Hong_Kong")).date().isoformat()
+        timeline = client.get("/api/library/timeline?day=" + day, headers=HEADERS)
+        assert timeline.status_code == 200
+        assert [item["id"] for item in timeline.json()["items"]] == [key]
+    assert BackupPolicy(root).policy()["enabled"] is False
+    assert RecordingStore(root).media_path(key) == path.resolve()

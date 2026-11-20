@@ -42,6 +42,8 @@ from . import (
     storage,
 )
 from .backup import BackupManager
+from .battery_history import RETENTION_DAYS, history_for
+from .battery_history import now_local as battery_now
 from .config import Settings
 from .errors import CameraError
 from .jobs import JobStore
@@ -731,6 +733,24 @@ def create_app(
     @app.post("/api/jobs/battery", status_code=202, dependencies=[Depends(authorize)])
     def battery_job():
         return submit(battery.refresh)
+
+    @app.get("/api/battery/history", dependencies=[Depends(authorize)])
+    def battery_history(day: date | None = None):
+        did = None
+        if config_path:
+            try:
+                did = Settings.load(config_path).did
+            except CameraError:
+                did = None
+        when = day or battery_now().date()
+        items = history_for(root).day(when, did)
+        return {
+            "day": when.isoformat(),
+            "device_id": did,
+            "count": len(items),
+            "items": items,
+            "retention_days": RETENTION_DAYS,
+        }
 
     @app.post("/api/live/ptz", dependencies=[Depends(authorize)])
     def move(body: MoveRequest):

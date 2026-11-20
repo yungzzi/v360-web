@@ -50,6 +50,10 @@ class BackupManager:
         }
         if state.get("state") == "authentication_required":
             self.state["state"] = "authentication_required"
+        if not self.db.policy()["enabled"]:
+            # A disabled policy stays visibly paused across restarts instead of
+            # reporting "waiting" for a schedule that will not run.
+            self.state["state"] = "paused"
         if self.db.read("policy") is None:
             policy = DEFAULT.copy()
             if storage.usage(root / "media") > 128 * 1024**2:

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from v360_web import battery, protocol
+from v360_web import battery, battery_history, protocol
 from v360_web.api import create_app
 from v360_web.controls import CameraControls
 from v360_web.errors import CameraError
@@ -82,3 +82,35 @@ def test_ptz_api_requires_auth_and_active_viewer(tmp_path, monkeypatch):
         assert calls == [3]
         body["direction"] = "invalid"
         assert client.post("/api/live/ptz", json=body, headers=headers).status_code == 422
+
+
+def test_watching_reading_is_kept_without_extra_camera_queries(tmp_path):
+    sent = []
+    settings = SimpleNamespace(did="watch-battery", data_root=tmp_path, command_channel=0)
+    frames = bytearray()
+
+    def send(command, payload):
+        sent.append(command)
+        frames.extend(protocol.command_frame(913, struct.pack("<iii", 71, 40000, 1)))
+
+    def rpc(op, **args):
+        data = bytes(frames[:13])
+        del frames[:13]
+        return {"ret": -3, "data": base64.b64encode(data).decode()}
+
+    control = CameraControls()
+    control.camera = SimpleNamespace(
+        settings=settings, session=9, send=send, bridge=SimpleNamespace(rpc=rpc)
+    )
+    for _ in range(3):
+        control.step(0)
+    for _ in range(3):
+        control.step(300)
+    # Same five-minute cadence as before: one query per reading, nothing extra.
+    assert sent == [912, 912]
+    rows = battery_history.history_for(tmp_path).day(
+        battery_history.now_local().date(), "watch-battery"
+    )
+    # The second read returns an identical packet, so it is de-duplicated.
+    assert len(rows) == 1
+    assert rows[0]["percent"] == 71 and rows[0]["charging"] is True

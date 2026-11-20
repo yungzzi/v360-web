@@ -4,7 +4,7 @@ import queue
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -174,25 +174,54 @@ def test_next_slot_covers_day_night_and_midnight():
         30,
     )
     assert server_capture.next_slot(datetime(2026, 11, 16, 6, 0, 1)) == (
-        datetime(2026, 11, 16, 6, 10),
+        datetime(2026, 11, 16, 6, 5),
         30,
     )
-    assert server_capture.next_slot(datetime(2026, 11, 16, 17, 59, 59)) == (
-        datetime(2026, 11, 16, 18, 0),
+    # 18:55 still belongs to the daytime plan; 19:00 is the first night slot.
+    assert server_capture.next_slot(datetime(2026, 11, 16, 18, 54, 59)) == (
+        datetime(2026, 11, 16, 18, 55),
+        30,
+    )
+    assert server_capture.next_slot(datetime(2026, 11, 16, 18, 55, 0)) == (
+        datetime(2026, 11, 16, 19, 0),
         15,
     )
-    assert server_capture.next_slot(datetime(2026, 11, 16, 18, 0, 1)) == (
-        datetime(2026, 11, 16, 18, 30),
+    assert server_capture.next_slot(datetime(2026, 11, 16, 19, 0, 1)) == (
+        datetime(2026, 11, 16, 19, 10),
         15,
     )
     assert server_capture.next_slot(datetime(2026, 11, 16, 23, 59, 59)) == (
         datetime(2026, 11, 17, 0, 0),
         15,
     )
+    assert server_capture.next_slot(datetime(2026, 11, 17, 0, 0, 1)) == (
+        datetime(2026, 11, 17, 0, 10),
+        15,
+    )
     assert server_capture.next_slot(datetime(2026, 11, 17, 5, 59, 59)) == (
         datetime(2026, 11, 17, 6, 0),
         30,
     )
+
+
+def test_daily_plan_has_222_aligned_slots_and_94_minutes():
+    start = datetime(2026, 11, 20, 6)
+    end = datetime(2026, 11, 21, 6)
+    slots, now = [], start - timedelta(seconds=1)
+    while True:
+        due, duration = server_capture.next_slot(now)
+        if due >= end:
+            break
+        slots.append((due, duration))
+        now = due
+    assert len(slots) == 222
+    assert sum(duration for _due, duration in slots) == 5670
+    assert slots[0] == (start, 30)
+    assert slots[-1] == (datetime(2026, 11, 21, 5, 50), 15)
+    for due, duration in slots:
+        interval = 5 if server_capture.daylight(due.hour) else 10
+        assert due.minute % interval == 0 and due.second == 0
+        assert duration == (30 if 6 <= due.hour < 19 else 15)
 
 
 def test_shared_output_creates_independent_playable_segments(manager, fragments, monkeypatch):
